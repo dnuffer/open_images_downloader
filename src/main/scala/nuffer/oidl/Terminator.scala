@@ -10,6 +10,8 @@ case object EndDownload
 
 case object InputCsvProcessingEnd
 
+case object FatalError
+
 class Terminator(materializer: ActorMaterializer, http: HttpExt) extends Actor with ActorLogging {
   var inFlight = 0
   var inputCsvProcessingDone = false
@@ -19,24 +21,30 @@ class Terminator(materializer: ActorMaterializer, http: HttpExt) extends Actor w
       inFlight += 1
     case EndDownload =>
       inFlight -= 1
-      checkForTermination
+      checkForTermination()
     case InputCsvProcessingEnd =>
       inputCsvProcessingDone = true
-      checkForTermination
+      checkForTermination()
+    case FatalError =>
+      terminate()
   }
 
-  private def checkForTermination: Unit = {
-    import scala.concurrent.ExecutionContext.Implicits.global
+  private def checkForTermination(): Unit = {
     if (inFlight == 0 && inputCsvProcessingDone) {
-      log.info("DownloadEnd, shutting down system")
-
-      log.info("http.shutdownAllConnectionPools()")
-      http.shutdownAllConnectionPools().onComplete { _ =>
-        log.info("materializer.shutdown()")
-        materializer.shutdown()
-        log.info("context.system.terminate()")
-        context.system.terminate()
-      }
+      terminate()
     }
+  }
+
+  private def terminate(): Unit = {
+    import scala.concurrent.ExecutionContext.Implicits.global
+    log.info("shutting down system")
+
+    log.info("http.shutdownAllConnectionPools()")
+    http.shutdownAllConnectionPools().onComplete({ _ =>
+      log.info("materializer.shutdown()")
+      materializer.shutdown()
+      log.info("context.system.terminate()")
+      context.system.terminate()
+    })
   }
 }

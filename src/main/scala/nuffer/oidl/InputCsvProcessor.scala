@@ -2,15 +2,15 @@ package nuffer.oidl
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
-import java.util.Base64
 
-import akka.actor.{Actor, ActorLogging, ActorRef}
+import akka.actor.{Actor, ActorLogging, ActorRef, ActorSystem}
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.model.{HttpRequest, Uri}
 import akka.stream.alpakka.csv.scaladsl.{CsvParsing, CsvToMap}
 import akka.stream.scaladsl.{FileIO, Sink, Source}
-import akka.stream.{ActorMaterializer, IOResult}
+import akka.stream.{ActorAttributes, ActorMaterializer, IOResult, Supervision}
 import akka.util.ByteString
+import nuffer.oidl.Utils._
 
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
@@ -23,7 +23,7 @@ class InputCsvProcessor(downloaderActor: ActorRef, terminatorActor: ActorRef, ac
   with ActorLogging {
 
   final implicit val materializer: ActorMaterializer = actorMaterializer
-  final implicit val system = context.system
+  final implicit val system: ActorSystem = context.system
 
   def makeRequest(line: Map[String, ByteString]) = HttpRequest(uri = line("OriginalURL").utf8String)
 
@@ -33,16 +33,6 @@ class InputCsvProcessor(downloaderActor: ActorRef, terminatorActor: ActorRef, ac
     val destPath: Path = outputDir.resolve(originalURL.path.toString().split('/').last)
     DownloadUrlToFile(originalURLStr, destPath, line("OriginalSize").utf8String.toLong,
       line("OriginalMD5").utf8String, checkMd5IfExists)
-  }
-
-  private def decodeBase64Md5(expectedMd5: String): ByteString = {
-    val decoder = Base64.getDecoder
-    val decodedMd5 = ByteString(decoder.decode(expectedMd5))
-    decodedMd5
-  }
-
-  private def hexify(byteString: ByteString): String = {
-    byteString.map("%02x".format(_)).mkString
   }
 
   private def needToDownload(filePath: Path, expectedSize: Long, doCheckMd5: Boolean, expectedMd5: String): Future[Boolean] = {
@@ -74,25 +64,32 @@ class InputCsvProcessor(downloaderActor: ActorRef, terminatorActor: ActorRef, ac
       log.info("start {}", inputCSVFilename)
 
       FileIO.fromPath(inputCSVFilename)
+        .withAttributes(ActorAttributes.supervisionStrategy(_ => Supervision.Stop))
         .via(CsvParsing.lineScanner(CsvParsing.Comma, CsvParsing.DoubleQuote, '\0'))
         .via(CsvToMap.toMap(StandardCharsets.UTF_8))
         .map(line => (makeRequest(line), makeDownloadUrlToFile(line, outputDir, checkMd5IfExists)))
         .mapAsyncUnordered(Runtime.getRuntime.availableProcessors() * 2)(x =>
-            for (nd <- needToDownload(x._2.filePath, x._2.expectedSize, x._2.checkMd5IfExists, x._2.expectedMd5))
-              yield (nd, x)
-          )
+          for (nd <- needToDownload(x._2.filePath, x._2.expectedSize, x._2.checkMd5IfExists, x._2.expectedMd5))
+            yield (nd, x)
+        )
         .filter(_._1)
         .map(_._2)
         //        .log("pre http").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
         .alsoTo(Sink.foreach(_ => terminatorActor ! StartDownload))
         .via(Http().superPool())
-        //        .log("post http").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
+        .watchTermination() {
+          case (_, eventualDone) =>
+            eventualDone.onComplete({
+              case Failure(error) =>
+                log.error("Failed: {}", error)
+                System.err.println("Failed: " + error)
+                terminatorActor ! FatalError
+              case Success(_) =>
+                log.info("done processing csv")
+                context.stop(self)
+              })
+        }
         .to(Sink.actorRef(downloaderActor, InputCsvProcessingEnd))
-
         .run()
-        .onComplete(_ => {
-          log.info("done processing csv")
-          context.stop(self)
-        })
   }
 }
