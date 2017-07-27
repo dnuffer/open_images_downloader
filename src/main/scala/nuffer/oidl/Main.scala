@@ -17,7 +17,7 @@ object Main extends App {
   class Conf(arguments: Seq[String]) extends ScallopConf(arguments) {
     val images_csv: ScallopOption[String] = opt[String](default = Some("test10images.csv"))
     val images_dir: ScallopOption[String] = opt[String](default = Some("images"))
-    val checkMd5IfExists: ScallopOption[Boolean] = opt[Boolean](default = Some(false))
+    val checkMd5IfExists: ScallopOption[Boolean] = opt[Boolean](default = Some(true))
     verify()
   }
 

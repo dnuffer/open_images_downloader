@@ -17,7 +17,7 @@ import scala.util.{Failure, Success, Try}
 
 case class DownloadUrlToFile(url: String, filePath: Path, expectedSize: Long, expectedMd5: String, checkMd5IfExists: Boolean)
 
-case class HttpResponseAndDownloadUrlToFile(response: HttpResponse, downloadUrlToFile: DownloadUrlToFile)
+//case class HttpResponseAndDownloadUrlToFile(response: HttpResponse, downloadUrlToFile: DownloadUrlToFile)
 
 class Downloader(terminatorActor: ActorRef, actorMaterializer: ActorMaterializer, http: HttpExt) extends Actor
   with ActorLogging {
@@ -28,23 +28,23 @@ class Downloader(terminatorActor: ActorRef, actorMaterializer: ActorMaterializer
   final implicit val materializer: ActorMaterializer = actorMaterializer
 
   override def receive: Receive = {
-    // start the download
-    case downloadParam@DownloadUrlToFile(url: String, filePath: Path, expectedSize: Long, expectedMd5: String, checkMd5IfExists: Boolean) =>
-      val needToDownloadFut = needToDownload(filePath, expectedSize, checkMd5IfExists, expectedMd5)
-      needToDownloadFut.andThen({
-        case Success(needToDownload) =>
-          if (needToDownload) {
-            //            log.info("Starting request for {}", url)
-            http.singleRequest(HttpRequest(uri = url)).map(httpResponse => HttpResponseAndDownloadUrlToFile(httpResponse, downloadParam)).pipeTo(self)
-          } else {
-            log.info("Skipping download of {}", url)
-            terminatorActor ! EndDownload
-          }
-      })
+//    // start the download
+//    case downloadParam@DownloadUrlToFile(url: String, filePath: Path, expectedSize: Long, expectedMd5: String, checkMd5IfExists: Boolean) =>
+//      val needToDownloadFut = needToDownload(filePath, expectedSize, checkMd5IfExists, expectedMd5)
+//      needToDownloadFut.andThen({
+//        case Success(needToDownload) =>
+//          if (needToDownload) {
+//            //            log.info("Starting request for {}", url)
+//            http.singleRequest(HttpRequest(uri = url)).map(httpResponse => HttpResponseAndDownloadUrlToFile(httpResponse, downloadParam)).pipeTo(self)
+//          } else {
+//            log.info("Skipping download of {}", url)
+//            terminatorActor ! EndDownload
+//          }
+//      })
 
     // server replied with a 200 OK
-    case HttpResponseAndDownloadUrlToFile(resp@HttpResponse(StatusCodes.OK, headers, entity1, _),
-    DownloadUrlToFile(url: String, filePath: Path, expectedSize: Long, expectedMd5: String, checkMd5IfExists: Boolean)) =>
+    case (Success(resp@HttpResponse(StatusCodes.OK, headers, entity1, _)),
+          DownloadUrlToFile(url: String, filePath: Path, expectedSize: Long, expectedMd5: String, checkMd5IfExists: Boolean)) =>
       log.info("{} OK. Content-Type: {}", url, entity1.contentType)
       val entity = entity1.withSizeLimit(Long.MaxValue)
       entity.contentType match {
@@ -100,7 +100,7 @@ class Downloader(terminatorActor: ActorRef, actorMaterializer: ActorMaterializer
 
 
     // handle redirects
-    case HttpResponseAndDownloadUrlToFile(resp@HttpResponse(Redirection(_), _, _, _), downloadParam: DownloadUrlToFile) =>
+    case (Success(resp@HttpResponse(Redirection(_), _, _, _)), downloadParam: DownloadUrlToFile) =>
       resp.header[headers.Location] match {
         case Some(location) =>
           log.info("{}: location: {}", downloadParam.url, location)
@@ -123,12 +123,18 @@ class Downloader(terminatorActor: ActorRef, actorMaterializer: ActorMaterializer
       }
 
     // handle failures
-    case HttpResponseAndDownloadUrlToFile(resp@HttpResponse(code, _, _, _), downloadParam: DownloadUrlToFile) =>
+    case (Success(resp@HttpResponse(code, _, _, _)), downloadParam: DownloadUrlToFile) =>
       log.error("{}: Request failed, response code: {}", downloadParam.url, code)
       resp.entity.dataBytes.runFold(ByteString(""))(_ ++ _).foreach { body =>
         log.error("{}: failure body: {}", downloadParam.url, body.utf8String)
         terminatorActor ! EndDownload
       }
+
+    case InputCsvProcessingEnd =>
+      terminatorActor ! InputCsvProcessingEnd
+
+    case m =>
+      log.error("unexpected message: {}", m)
   }
 
   private def decodeBase64Md5(expectedMd5: String): ByteString = {
