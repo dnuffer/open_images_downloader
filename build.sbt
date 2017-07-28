@@ -12,3 +12,4 @@ libraryDependencies += "com.typesafe.akka" % "akka-testkit_2.12" % akkaVersion %
 libraryDependencies += "com.typesafe.akka" % "akka-http-core_2.12" % "10.0.9"
 libraryDependencies += "org.rogach" %% "scallop" % "3.0.3" // command line parsing
 libraryDependencies += "com.lightbend.akka" %% "akka-stream-alpakka-csv" % "0.10"
+libraryDependencies += "org.apache.commons" % "commons-compress" % "1.14" // for tar file parsing/extraction

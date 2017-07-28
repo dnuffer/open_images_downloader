@@ -29,7 +29,7 @@ class Downloader(terminatorActor: ActorRef, actorMaterializer: ActorMaterializer
     case (Success(resp@HttpResponse(StatusCodes.OK, headers, entity1, _)),
           DownloadUrlToFile(url: String, filePath: Path, expectedSize: Long, expectedMd5: String, checkMd5IfExists: Boolean)) =>
       log.info("{} OK. Content-Type: {}", url, entity1.contentType)
-      val entity = entity1.withSizeLimit(Long.MaxValue)
+      val entity = entity1.withoutSizeLimit()
       entity.contentType match {
         case Binary(MediaTypes.`image/jpeg`) =>
           entity.contentLengthOption match {
