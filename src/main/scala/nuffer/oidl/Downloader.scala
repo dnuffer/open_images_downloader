@@ -17,12 +17,12 @@ import scala.util.{Failure, Success}
 
 case class DownloadUrlToFile(url: String, filePath: Path, expectedSize: Long, expectedMd5: String, checkMd5IfExists: Boolean)
 
-class Downloader(terminatorActor: ActorRef, actorMaterializer: ActorMaterializer, http: HttpExt) extends Actor
+class Downloader(terminatorActor: ActorRef, http: HttpExt) extends Actor
   with ActorLogging {
 
   import context.dispatcher
 
-  final implicit val materializer: ActorMaterializer = actorMaterializer
+  final implicit val materializer: ActorMaterializer = ActorMaterializer()
 
   override def receive: Receive = {
     // server replied with a 200 OK
@@ -113,10 +113,14 @@ class Downloader(terminatorActor: ActorRef, actorMaterializer: ActorMaterializer
         terminatorActor ! EndDownload
       }
 
+    case (Failure(exception), downloadParam: DownloadUrlToFile) =>
+      log.error("{}: Request failed: {}", downloadParam.url, exception)
+      terminatorActor ! EndDownload
+
     case InputCsvProcessingEnd =>
       terminatorActor ! InputCsvProcessingEnd
 
     case m =>
-      log.error("unexpected message: {}", m)
+      log.error("Downloader received unexpected message: {}", m)
   }
 }

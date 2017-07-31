@@ -21,13 +21,13 @@ import scala.concurrent.{Await, Future}
 import scala.util.{Failure, Success, Try}
 
 
-case class StartProcessingInputCsv(inputCSVFilename: Path, outputDir: Path, checkMd5IfExists: Boolean)
+case class StartProcessingInputCsv(inputCSVFilename: Path, outputDir: Path, checkMd5IfExists: Boolean, alwaysDownload: Boolean)
 
-class InputCsvProcessor(downloaderActor: ActorRef, terminatorActor: ActorRef, actorMaterializer: ActorMaterializer) extends Actor
+class InputCsvProcessor(downloaderActor: ActorRef, terminatorActor: ActorRef) extends Actor
   with ActorLogging {
 
-  final implicit val materializer: ActorMaterializer = actorMaterializer
   final implicit val system: ActorSystem = context.system
+  final implicit val materializer: ActorMaterializer = ActorMaterializer()
 
   def makeRequest(line: Map[String, ByteString]) = HttpRequest(uri = line("OriginalURL").utf8String)
 
@@ -39,32 +39,36 @@ class InputCsvProcessor(downloaderActor: ActorRef, terminatorActor: ActorRef, ac
       line("OriginalMD5").utf8String, checkMd5IfExists)
   }
 
-  private def needToDownload(filePath: Path, expectedSize: Long, doCheckMd5: Boolean, expectedMd5: String): Future[Boolean] = {
-    Try(Files.size(filePath)) match {
-      case Success(size) =>
-        if (size != expectedSize) {
-          Future(true)
-        } else {
-          // the file exists and the size matches, now we need to verify the md5
-          if (doCheckMd5) {
-            val fileSource: Source[ByteString, Future[IOResult]] = FileIO.fromPath(filePath)
-            val md5CalculatorSink: Sink[ByteString, Future[DigestResult]] = DigestCalculator.sink(Algorithm.MD5)
-            fileSource.runWith(md5CalculatorSink).map { md5DigestResult =>
-              log.info("checked md5sum of {}. got {}, expected {}",
-                filePath, hexify(md5DigestResult.messageDigest), hexify(decodeBase64Md5(expectedMd5)))
-              md5DigestResult.messageDigest != decodeBase64Md5(expectedMd5)
-            }
+  private def needToDownload(filePath: Path, expectedSize: Long, doCheckMd5: Boolean, expectedMd5: String, alwaysDownload: Boolean): Future[Boolean] = {
+    if (alwaysDownload) {
+      Future(true)
+    } else {
+      Try(Files.size(filePath)) match {
+        case Success(size) =>
+          if (size != expectedSize) {
+            Future(true)
           } else {
-            Future(false)
+            // the file exists and the size matches, now we need to verify the md5
+            if (doCheckMd5) {
+              val fileSource: Source[ByteString, Future[IOResult]] = FileIO.fromPath(filePath)
+              val md5CalculatorSink: Sink[ByteString, Future[DigestResult]] = DigestCalculator.sink(Algorithm.MD5)
+              fileSource.runWith(md5CalculatorSink).map { md5DigestResult =>
+                log.info("checked md5sum of {}. got {}, expected {}",
+                  filePath, hexify(md5DigestResult.messageDigest), hexify(decodeBase64Md5(expectedMd5)))
+                md5DigestResult.messageDigest != decodeBase64Md5(expectedMd5)
+              }
+            } else {
+              Future(false)
+            }
           }
-        }
 
-      case Failure(_) => Future(true)
+        case Failure(_) => Future(true)
+      }
     }
   }
 
   override def receive: Receive = {
-    case StartProcessingInputCsv(inputCSVFilename: Path, outputDir: Path, checkMd5IfExists: Boolean) =>
+    case StartProcessingInputCsv(inputCSVFilename: Path, outputDir: Path, checkMd5IfExists: Boolean, alwaysDownload: Boolean) =>
       log.info("start {}", inputCSVFilename)
 
       val downloadImagesTarGz: Boolean = false
@@ -93,7 +97,11 @@ class InputCsvProcessor(downloaderActor: ActorRef, terminatorActor: ActorRef, ac
           tarArchiveInputStream =>
             val nextTarEntry: TarArchiveEntry = tarArchiveInputStream.getNextTarEntry
             if (nextTarEntry != null)
-              Some((tarArchiveInputStream, nextTarEntry))
+              if (nextTarEntry.isCheckSumOK) {
+                Some((tarArchiveInputStream, nextTarEntry))
+              } else {
+                throw new TarFileCorruptedException
+              }
             else
               None
         }
@@ -123,56 +131,61 @@ class InputCsvProcessor(downloaderActor: ActorRef, terminatorActor: ActorRef, ac
 
       }
 
-      val readFromUrl = false
+      val countLinesInImagesTarGz = false
 
-      val tarInputStream =
-        if (readFromUrl) {
-          Source.fromFuture(
-            Http().singleRequest(HttpRequest(uri = "https://storage.googleapis.com/openimages/2017_07/images_2017_07.tar.gz")))
-            .flatMapConcat(httpResponse => httpResponse.entity.withoutSizeLimit().dataBytes)
-            .via(Compression.gunzip())
-            .runWith(StreamConverters.asInputStream())
-        } else {
-          new FileInputStream("images_2017_07.tar")
-        }
+      if (countLinesInImagesTarGz) {
+        val readFromUrl = false
 
-      val tarArchiveInputStream = new TarArchiveInputStream(tarInputStream)
+        val tarInputStream =
+          if (readFromUrl) {
+            Source.fromFuture(
+              Http().singleRequest(HttpRequest(uri = "https://storage.googleapis.com/openimages/2017_07/images_2017_07.tar.gz")))
+              .flatMapConcat(httpResponse => httpResponse.entity.withoutSizeLimit().dataBytes)
+              .via(Compression.gunzip())
+              .runWith(StreamConverters.asInputStream())
+          } else {
+            new FileInputStream("images_2017_07.tar")
+          }
 
-      Await.result(
-        Source.unfold(tarArchiveInputStream) {
-          tarArchiveInputStream =>
-            val nextTarEntry: TarArchiveEntry = tarArchiveInputStream.getNextTarEntry
-            if (nextTarEntry != null)
-              Some((tarArchiveInputStream, nextTarEntry))
-            else
-              None
-        }
-          .log("tar entry").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
-          .map(tarEntry => {
-            log.info("tarEntry: {}", tarEntry.getName)
-            println(tarEntry.getName)
-            Paths.get(tarEntry.getName).toFile.mkdirs()
-            StreamConverters.fromInputStream(() => TarEntryInputStream(tarArchiveInputStream))
-              .via(CsvParsing.lineScanner(CsvParsing.Comma, CsvParsing.DoubleQuote, '\0'))
-              .via(CsvToMap.toMap())
-          })
-          .flatMapConcat(identity)
-          //          .log("csv line").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
-          .fold(Map[String, Int]().withDefaultValue(0)) { (map, csvLine) =>
-          map.updated(csvLine("Subset").utf8String, map(csvLine("Subset").utf8String) + 1)
-        }
-          .log("csv counts").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
-          .runWith(Sink.ignore),
-        Duration.Inf)
+        val tarArchiveInputStream = new TarArchiveInputStream(tarInputStream)
+
+        Await.result(
+          Source.unfold(tarArchiveInputStream) {
+            tarArchiveInputStream =>
+              val nextTarEntry: TarArchiveEntry = tarArchiveInputStream.getNextTarEntry
+              if (nextTarEntry != null)
+                if (nextTarEntry.isCheckSumOK) {
+                  Some((tarArchiveInputStream, nextTarEntry))
+                } else {
+                  throw new TarFileCorruptedException
+                }
+              else
+                None
+          }
+            .log("tar entry").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
+            .map(tarEntry => {
+              log.info("tarEntry: {}", tarEntry.getName)
+              println(tarEntry.getName)
+              Paths.get(tarEntry.getName).toFile.mkdirs()
+              StreamConverters.fromInputStream(() => TarEntryInputStream(tarArchiveInputStream))
+                .via(CsvParsing.lineScanner(CsvParsing.Comma, CsvParsing.DoubleQuote, '\0'))
+                .via(CsvToMap.toMap())
+            })
+            .flatMapConcat(identity)
+            //          .log("csv line").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
+            .fold(Map[String, Int]().withDefaultValue(0)) { (map, csvLine) =>
+            map.updated(csvLine("Subset").utf8String, map(csvLine("Subset").utf8String) + 1)
+          }
+            .log("csv counts").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
+            .runWith(Sink.ignore),
+          Duration.Inf)
+
+      }
+
+//      terminatorActor ! FatalError
 
 
-      terminatorActor ! FatalError
-
-      // TODO: save the images.csv files locally while simultaneously feeding them into the url downloading.
-      // Probably by creating a custom graph stage similar to Ops.Buffer but storing the data in a file instead
-      // of a memory buffer.
-
-      val downloadImages: Boolean = false
+      val downloadImages: Boolean = true
 
       if (downloadImages) {
         FileIO.fromPath(inputCSVFilename)
@@ -181,7 +194,7 @@ class InputCsvProcessor(downloaderActor: ActorRef, terminatorActor: ActorRef, ac
           .via(CsvToMap.toMap())
           .map(line => (makeRequest(line), makeDownloadUrlToFile(line, outputDir, checkMd5IfExists)))
           .mapAsyncUnordered(Runtime.getRuntime.availableProcessors() * 2)(x =>
-            for (nd <- needToDownload(x._2.filePath, x._2.expectedSize, x._2.checkMd5IfExists, x._2.expectedMd5))
+            for (nd <- needToDownload(x._2.filePath, x._2.expectedSize, x._2.checkMd5IfExists, x._2.expectedMd5, alwaysDownload))
               yield (nd, x)
           )
           .filter(_._1)
@@ -205,4 +218,7 @@ class InputCsvProcessor(downloaderActor: ActorRef, terminatorActor: ActorRef, ac
           .run()
       }
   }
+
+  class TarFileCorruptedException extends RuntimeException
+
 }

@@ -5,27 +5,40 @@ import java.nio.file.Paths
 import akka.actor.{ActorSystem, Props}
 import akka.http.scaladsl.Http
 import akka.stream.ActorMaterializer
+import com.typesafe.config.{ConfigFactory, ConfigValueFactory}
 import org.rogach.scallop.{ScallopConf, ScallopOption}
 
 object Main extends App {
-  implicit val system = ActorSystem()
-  implicit val materializer = ActorMaterializer()
-  implicit val executionContext = system.dispatcher
-  val http = Http(system)
-
-
   class Conf(arguments: Seq[String]) extends ScallopConf(arguments) {
-    val images_csv: ScallopOption[String] = opt[String](default = Some("test10images.csv"))
-    val images_dir: ScallopOption[String] = opt[String](default = Some("images"))
-    val checkMd5IfExists: ScallopOption[Boolean] = opt[Boolean](default = Some(true))
+    val rootDir: ScallopOption[String] = opt[String](descr = "top-level directory for storing the Open Images dataset")
+    val imagesCsv: ScallopOption[String] = opt[String](descr = "If this option is specified, only download and process the images in the indicated file.")
+    val originalImagesDir: ScallopOption[String] = opt[String](descr = "If specified, the downloaded original images will be stored in this directory. Otherwise they are placed in <open images dir>/2017_07/{train,validation,test}/images")
+    val checkMd5IfExists: ScallopOption[Boolean] = toggle(default = Some(false), descrYes = "If an image already exists locally in <image dir> and is the same size as the original, check the md5 sum of the file to determine whether to download it.")
+    val alwaysDownload: ScallopOption[Boolean] = toggle(default = Some(false), descrYes = "Download and process all images even if the file already exists in <image dir>. This is intended for testing. The check-md5-if-exists option should be sufficient if local data corruption is suspected.")
+    val doTrain: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "Download and process images in the training set")
+    val doValidation: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "Download and process images in the validation set")
+    val doTest: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "Download and process images in the test set")
+    val maxRetries: ScallopOption[Int] = opt[Int](default = Some(15), descr = "Number of times to retry failed downloads", validate = 0 <)
     verify()
   }
 
   val conf = new Conf(args)
 
-  val terminatorActor = system.actorOf(Props(classOf[Terminator], materializer, http), "Terminator")
-  val downloaderActor = system.actorOf(Props(classOf[Downloader], terminatorActor, materializer, http), name = "Downloader")
-  val inputCsvProcessorActor = system.actorOf(Props(classOf[InputCsvProcessor], downloaderActor, terminatorActor, materializer), name = "InputCsvProcessor")
+  val mainConfig = ConfigFactory.load()
+      .withValue("akka.http.host-connection-pool.max-retries", ConfigValueFactory.fromAnyRef(conf.maxRetries()))
+//    .withValue("akka.http.host-connection-pool.max-connections", ConfigValueFactory.fromAnyRef(1))
+//    .withValue("akka.http.host-connection-pool.idle-timeout", ConfigValueFactory.fromAnyRef("1 s"))
+//    .withValue("akka.http.host-connection-pool.client.idle-timeout", ConfigValueFactory.fromAnyRef("1ms"))
+  implicit val system = ActorSystem("oidl", mainConfig)
+  implicit val materializer = ActorMaterializer()
+  implicit val executionContext = system.dispatcher
+  val http = Http(system)
 
-  inputCsvProcessorActor ! StartProcessingInputCsv(Paths.get(conf.images_csv()), Paths.get(conf.images_dir()), conf.checkMd5IfExists())
+
+  val terminatorActor = system.actorOf(Props(classOf[Terminator]), "Terminator")
+  val downloaderActor = system.actorOf(Props(classOf[Downloader], terminatorActor, http), name = "Downloader")
+  val inputCsvProcessorActor = system.actorOf(Props(classOf[InputCsvProcessor], downloaderActor, terminatorActor), name = "InputCsvProcessor")
+
+  inputCsvProcessorActor ! StartProcessingInputCsv(Paths.get(conf.imagesCsv()), Paths.get(conf.originalImagesDir()), conf.checkMd5IfExists(),
+    conf.alwaysDownload())
 }
