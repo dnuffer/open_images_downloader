@@ -207,5 +207,43 @@ class FlowLevelByteStringsSizeSpec extends StreamSpec {
         ByteString.fromInts((1 to 101).map(_ => 1): _*)
       }))
     }
+
+    "multiple sizes chained, partial last item" in {
+      val future: Future[Seq[ByteString]] = Source.repeat(ByteString(1))
+        .take(101 * 101 - 1)
+        .via(LevelByteStringsSize(1))
+        .via(LevelByteStringsSize(2))
+        .via(LevelByteStringsSize(3))
+        .via(LevelByteStringsSize(4))
+        .via(LevelByteStringsSize(5))
+        .via(LevelByteStringsSize(8))
+        .via(LevelByteStringsSize(13))
+        .via(LevelByteStringsSize(17))
+        .via(LevelByteStringsSize(13))
+        .via(LevelByteStringsSize(11))
+        .via(LevelByteStringsSize(7))
+        .via(LevelByteStringsSize(5))
+        .via(LevelByteStringsSize(3))
+        .via(LevelByteStringsSize(127))
+        .via(LevelByteStringsSize(2))
+        .via(LevelByteStringsSize(4))
+        .via(LevelByteStringsSize(8))
+        .via(LevelByteStringsSize(16))
+        .via(LevelByteStringsSize(8))
+        .via(LevelByteStringsSize(4))
+        .via(LevelByteStringsSize(2))
+        .via(LevelByteStringsSize(7))
+        .via(LevelByteStringsSize(101))
+        .grouped(101)
+        .runWith(Sink.head)
+
+      val result = Await.result(future, 3.seconds)
+      result should be((1 to 101).map(x => {
+        if (x < 101)
+          ByteString.fromInts((1 to 101).map(_ => 1): _*)
+        else
+          ByteString.fromInts((1 to 100).map(_ => 1): _*)
+      }))
+    }
   }
 }
