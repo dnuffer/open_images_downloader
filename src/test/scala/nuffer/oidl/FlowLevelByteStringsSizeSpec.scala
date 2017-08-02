@@ -123,5 +123,89 @@ class FlowLevelByteStringsSizeSpec extends StreamSpec {
       subscriber.expectNext(ByteString(3))
       subscriber.expectComplete()
     }
+
+    "5 items, buffer size 2" in {
+      val publisher = TestPublisher.probe[ByteString]()
+      val subscriber = TestSubscriber.manualProbe[ByteString]()
+      Source.fromPublisher(publisher)
+        .via(LevelByteStringsSize(2))
+        .to(Sink.fromSubscriber(subscriber))
+        .run()
+      val sub = subscriber.expectSubscription()
+      publisher.sendNext(ByteString(1))
+      publisher.sendNext(ByteString(2))
+      sub.request(1)
+      subscriber.expectNext(ByteString(1, 2))
+      publisher.sendNext(ByteString(3))
+      publisher.sendNext(ByteString(4))
+      sub.request(1)
+      subscriber.expectNext(ByteString(3, 4))
+
+      publisher.sendNext(ByteString(5))
+      publisher.sendComplete()
+
+      sub.request(2)
+      subscriber.expectNext(ByteString(5))
+      subscriber.expectComplete()
+    }
+
+    "level chunksize 2" in {
+      val future: Future[Seq[ByteString]] = Source.repeat(ByteString(1))
+        .via(LevelByteStringsSize(2))
+        .grouped(101)
+        .runWith(Sink.head)
+
+      val result = Await.result(future, 3.seconds)
+      result should be((1 to 101).map(_ => {
+        ByteString.fromInts((1 to 2).map(_ => 1): _*)
+      }))
+    }
+
+    "multiple sizes chained 2" in {
+      val future: Future[Seq[ByteString]] = Source.repeat(ByteString(1))
+        .via(LevelByteStringsSize(1))
+        .via(LevelByteStringsSize(2))
+        .grouped(101)
+        .runWith(Sink.head)
+
+      val result = Await.result(future, 3.seconds)
+      result should be((1 to 101).map(_ => {
+        ByteString.fromInts((1 to 2).map(_ => 1): _*)
+      }))
+    }
+
+    "multiple sizes chained" in {
+      val future: Future[Seq[ByteString]] = Source.repeat(ByteString(1))
+        .via(LevelByteStringsSize(1))
+        .via(LevelByteStringsSize(2))
+        .via(LevelByteStringsSize(3))
+        .via(LevelByteStringsSize(4))
+        .via(LevelByteStringsSize(5))
+        .via(LevelByteStringsSize(8))
+        .via(LevelByteStringsSize(13))
+        .via(LevelByteStringsSize(17))
+        .via(LevelByteStringsSize(13))
+        .via(LevelByteStringsSize(11))
+        .via(LevelByteStringsSize(7))
+        .via(LevelByteStringsSize(5))
+        .via(LevelByteStringsSize(3))
+        .via(LevelByteStringsSize(127))
+        .via(LevelByteStringsSize(2))
+        .via(LevelByteStringsSize(4))
+        .via(LevelByteStringsSize(8))
+        .via(LevelByteStringsSize(16))
+        .via(LevelByteStringsSize(8))
+        .via(LevelByteStringsSize(4))
+        .via(LevelByteStringsSize(2))
+        .via(LevelByteStringsSize(7))
+        .via(LevelByteStringsSize(101))
+        .grouped(101)
+        .runWith(Sink.head)
+
+      val result = Await.result(future, 3.seconds)
+      result should be((1 to 101).map(_ => {
+        ByteString.fromInts((1 to 101).map(_ => 1): _*)
+      }))
+    }
   }
 }

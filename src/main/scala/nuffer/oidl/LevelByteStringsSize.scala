@@ -35,9 +35,10 @@ final case class LevelByteStringsSize(chunkSize: Int = 8192) extends SimpleLinea
     }
 
     override def onPull(): Unit = {
-      if (buffer.nonEmpty) {
+      if (buffer.length >= chunkSize || (isClosed(in) && buffer.nonEmpty)) {
         pushChunkToOut()
       }
+
       if (isClosed(in)) {
         if (buffer.isEmpty) {
           completeStage()
