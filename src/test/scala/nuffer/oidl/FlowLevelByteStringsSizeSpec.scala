@@ -245,5 +245,23 @@ class FlowLevelByteStringsSizeSpec extends StreamSpec {
           ByteString.fromInts((1 to 100).map(_ => 1): _*)
       }))
     }
+
+    "empty source" in {
+      val future: Future[Seq[ByteString]] = Source.empty
+        .via(LevelByteStringsSize(2))
+        .runWith(Sink.seq)
+
+      val result = Await.result(future, 3.seconds)
+      result should be(Vector())
+    }
+
+    "empty ByteString" in {
+      val future: Future[Seq[ByteString]] = Source.single(ByteString())
+        .via(LevelByteStringsSize(2))
+        .runWith(Sink.seq)
+
+      val result = Await.result(future, 3.seconds)
+      result should be(Vector())
+    }
   }
 }

@@ -7,6 +7,7 @@ import akka.stream.testkit.StreamSpec
 import akka.stream.{ActorMaterializer, ActorMaterializerSettings}
 import akka.util.ByteString
 
+import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
 import scala.concurrent.{Await, Future}
 
@@ -21,7 +22,7 @@ class FlowCacheFileSpec extends StreamSpec {
       val tempFilePath = Files.createTempFile("FlowBufferToFileSpec", "tmp")
       val future: Future[Vector[Byte]] = Source.repeat(ByteString("a"))
         .take(100)
-        .via(CacheFile(tempFilePath, expectedSize = 100))
+        .via(CacheFile.flow(tempFilePath, expectedSize = 100))
         .grouped(101)
         .map(x => x.flatten.toVector)
         .runWith(Sink.head)
