@@ -3,7 +3,6 @@ package nuffer.oidl
 import java.nio.file.{Path, Paths}
 
 import akka.actor.{Actor, ActorLogging, ActorRef, ActorSystem}
-import akka.event.Logging
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.model.{HttpRequest, Uri}
 import akka.stream._
@@ -16,6 +15,7 @@ import org.apache.commons.compress.archivers.tar.{TarArchiveEntry, TarArchiveInp
 import scala.concurrent.Await
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.Duration
+import scala.util.Success
 
 
 case class StartProcessing()
@@ -36,37 +36,8 @@ class InputCsvProcessor(downloaderActor: ActorRef, terminatorActor: ActorRef) ex
       line("OriginalMD5").utf8String, checkMd5IfExists)
   }
 
-//  private def needToDownload(filePath: Path, expectedSize: Long, doCheckMd5: Boolean, expectedMd5: String, alwaysDownload: Boolean): Future[Boolean] = {
-//    if (alwaysDownload) {
-//      Future(true)
-//    } else {
-//      Try(Files.size(filePath)) match {
-//        case Success(size) =>
-//          if (size != expectedSize) {
-//            Future(true)
-//          } else {
-//            // the file exists and the size matches, now we need to verify the md5
-//            if (doCheckMd5) {
-//              val fileSource: Source[ByteString, Future[IOResult]] = FileIO.fromPath(filePath)
-//              val md5CalculatorSink: Sink[ByteString, Future[DigestResult]] = DigestCalculator.sink(Algorithm.MD5)
-//              fileSource.runWith(md5CalculatorSink).map { md5DigestResult =>
-//                log.info("checked md5sum of {}. got {}, expected {}",
-//                  filePath, hexify(md5DigestResult.messageDigest), hexify(decodeBase64Md5(expectedMd5)))
-//                md5DigestResult.messageDigest != decodeBase64Md5(expectedMd5)
-//              }
-//            } else {
-//              Future(false)
-//            }
-//          }
-//
-//        case Failure(_) => Future(true)
-//      }
-//    }
-//  }
-
   override def receive: Receive = {
     case StartProcessing() =>
-      //      log.info("start {}", inputCSVFilename)
       Await.result(
         Source.fromFuture(Http().singleRequest(HttpRequest(uri = "https://storage.googleapis.com/openimages/2017_07/images_2017_07.tar.gz")))
           .flatMapConcat(httpResponse => httpResponse.entity.withoutSizeLimit().dataBytes)
@@ -98,7 +69,6 @@ class InputCsvProcessor(downloaderActor: ActorRef, terminatorActor: ActorRef) ex
             }
           })
           .run()
-          //          .log("tar entry").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
           .map({
             case (tarArchiveInputStream, tarEntry) =>
               log.info("tarEntry.name: {}", tarEntry.getName)
@@ -113,111 +83,19 @@ class InputCsvProcessor(downloaderActor: ActorRef, terminatorActor: ActorRef) ex
                 .via(CsvToMap.toMap())
           })
           .flatMapConcat(identity)
-          //          .log("csv line").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
-          .fold(Map[String, Int]().withDefaultValue(0)) { (map, csvLine) =>
-          map.updated(csvLine("Subset").utf8String, map(csvLine("Subset").utf8String) + 1)
-        }
-          .log("csv counts").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
+          .alsoTo(Sink.fold(Map[String, Int]().withDefaultValue(0))({
+              (map: Map[String, Int], csvLine: Map[String, ByteString]) => map.updated(csvLine("Subset").utf8String, map(csvLine("Subset").utf8String) + 1)
+            }).mapMaterializedValue(futureMap => futureMap.onComplete({
+              case Success(m) => log.info("number of lines per type: {}", m)
+            }))
+          )
           .runWith(Sink.ignore)
 
         , Duration.Inf)
 
       terminatorActor ! FatalError
 
-    //      val countCsvEntriesInTar: Boolean = false
-    //      if (countCsvEntriesInTar) {
-    //        val tais = new TarArchiveInputStream(new FileInputStream("images_2017_07.tar"))
-    //
-    //        val tarEntrySource = Source.unfold(tais) {
-    //          tarArchiveInputStream =>
-    //            val nextTarEntry: TarArchiveEntry = tarArchiveInputStream.getNextTarEntry
-    //            if (nextTarEntry != null)
-    //              if (nextTarEntry.isCheckSumOK) {
-    //                Some((tarArchiveInputStream, nextTarEntry))
-    //              } else {
-    //                throw new TarFileCorruptedException
-    //              }
-    //            else
-    //              None
-    //        }
-    //
-    //        val foo: Source[Source[ByteString, Future[IOResult]], NotUsed] = tarEntrySource.map(tarEntry => {
-    //          log.info("tarEntry: {}", tarEntry.getName)
-    //          println(tarEntry.getName)
-    //          Paths.get(tarEntry.getName).toFile.mkdirs()
-    //          StreamConverters.fromInputStream(() => TarEntryInputStream(tais))
-    //        })
-    //
-    //        val bar = foo
-    //          .log("tar entry").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
-    //          .flatMapConcat(y => y)
-    //
-    //        val baz = bar
-    //          .via(CsvParsing.lineScanner(CsvParsing.Comma, CsvParsing.DoubleQuote, '\0'))
-    //          .via(CsvToMap.toMap())
-    //          .filterNot(line => line("Subset").utf8String == "Subset")
-    //          .fold(Map[String, Int]().withDefaultValue(0)) { (x, y) =>
-    //            x.updated(y("Subset").utf8String, x(y("Subset").utf8String) + 1)
-    //          }
-    //          .log("csv counts").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
-    //
-    //
-    //        Await.result(baz.runWith(Sink.ignore), Duration.Inf)
-    //
-    //      }
 
-    //      val countLinesInImagesTarGz = false
-    //
-    //      if (countLinesInImagesTarGz) {
-    //        val readFromUrl = false
-    //
-    //        val tarInputStream =
-    //          if (readFromUrl) {
-    //            Source.fromFuture(
-    //              Http().singleRequest(HttpRequest(uri = "https://storage.googleapis.com/openimages/2017_07/images_2017_07.tar.gz")))
-    //              .flatMapConcat(httpResponse => httpResponse.entity.withoutSizeLimit().dataBytes)
-    //              .via(Compression.gunzip())
-    //              .runWith(StreamConverters.asInputStream())
-    //          } else {
-    //            new FileInputStream("images_2017_07.tar")
-    //          }
-    //
-    //        val tarArchiveInputStream = new TarArchiveInputStream(tarInputStream)
-    //
-    //        Await.result(
-    //          Source.unfold(tarArchiveInputStream) {
-    //            tarArchiveInputStream =>
-    //              val nextTarEntry: TarArchiveEntry = tarArchiveInputStream.getNextTarEntry
-    //              if (nextTarEntry != null)
-    //                if (nextTarEntry.isCheckSumOK) {
-    //                  Some((tarArchiveInputStream, nextTarEntry))
-    //                } else {
-    //                  throw new TarFileCorruptedException
-    //                }
-    //              else
-    //                None
-    //          }
-    //            .log("tar entry").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
-    //            .map(tarEntry => {
-    //              log.info("tarEntry: {}", tarEntry.getName)
-    //              println(tarEntry.getName)
-    //              Paths.get(tarEntry.getName).toFile.mkdirs()
-    //              StreamConverters.fromInputStream(() => TarEntryInputStream(tarArchiveInputStream))
-    //                .via(CsvParsing.lineScanner(CsvParsing.Comma, CsvParsing.DoubleQuote, '\0'))
-    //                .via(CsvToMap.toMap())
-    //            })
-    //            .flatMapConcat(identity)
-    //            //          .log("csv line").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
-    //            .fold(Map[String, Int]().withDefaultValue(0)) { (map, csvLine) =>
-    //            map.updated(csvLine("Subset").utf8String, map(csvLine("Subset").utf8String) + 1)
-    //          }
-    //            .log("csv counts").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
-    //            .runWith(Sink.ignore),
-    //          Duration.Inf)
-    //
-    //      }
-
-    //      terminatorActor ! FatalError
 
 
     //      val downloadImages: Boolean = true
