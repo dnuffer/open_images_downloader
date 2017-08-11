@@ -1,7 +1,5 @@
 package nuffer.oidl
 
-import java.nio.file.Paths
-
 import akka.actor.{ActorSystem, Props}
 import akka.http.scaladsl.Http
 import akka.stream.ActorMaterializer
@@ -39,6 +37,7 @@ object Main extends App {
   val downloaderActor = system.actorOf(Props(classOf[Downloader], terminatorActor, http), name = "Downloader")
   val inputCsvProcessorActor = system.actorOf(Props(classOf[InputCsvProcessor], downloaderActor, terminatorActor), name = "InputCsvProcessor")
 
-  inputCsvProcessorActor ! StartProcessingInputCsv(Paths.get(conf.imagesCsv()), Paths.get(conf.originalImagesDir()), conf.checkMd5IfExists(),
-    conf.alwaysDownload())
+//  inputCsvProcessorActor ! StartProcessingInputCsv(Paths.get(conf.imagesCsv()), Paths.get(conf.originalImagesDir()), conf.checkMd5IfExists(),
+//    conf.alwaysDownload())
+  inputCsvProcessorActor ! StartProcessing()
 }

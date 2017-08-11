@@ -1,16 +1,14 @@
 package nuffer.oidl
 
-import java.io.FileInputStream
 import java.nio.file.{Files, Path, Paths}
 
-import akka.NotUsed
 import akka.actor.{Actor, ActorLogging, ActorRef, ActorSystem}
 import akka.event.Logging
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.model.{HttpRequest, Uri}
 import akka.stream._
 import akka.stream.alpakka.csv.scaladsl.{CsvParsing, CsvToMap}
-import akka.stream.scaladsl.{Compression, FileIO, Sink, Source, StreamConverters}
+import akka.stream.scaladsl.{Compression, FileIO, Keep, Sink, Source, StreamConverters}
 import akka.util.ByteString
 import nuffer.oidl.Utils._
 import org.apache.commons.compress.archivers.tar.{TarArchiveEntry, TarArchiveInputStream}
@@ -21,7 +19,7 @@ import scala.concurrent.{Await, Future}
 import scala.util.{Failure, Success, Try}
 
 
-case class StartProcessingInputCsv(inputCSVFilename: Path, outputDir: Path, checkMd5IfExists: Boolean, alwaysDownload: Boolean)
+case class StartProcessing()
 
 class InputCsvProcessor(downloaderActor: ActorRef, terminatorActor: ActorRef) extends Actor
   with ActorLogging {
@@ -68,155 +66,188 @@ class InputCsvProcessor(downloaderActor: ActorRef, terminatorActor: ActorRef) ex
   }
 
   override def receive: Receive = {
-    case StartProcessingInputCsv(inputCSVFilename: Path, outputDir: Path, checkMd5IfExists: Boolean, alwaysDownload: Boolean) =>
-      log.info("start {}", inputCSVFilename)
-
-      val downloadImagesTarGz: Boolean = false
-      if (downloadImagesTarGz) {
+    case StartProcessing() =>
+      //      log.info("start {}", inputCSVFilename)
+      Await.result(
         Source.fromFuture(Http().singleRequest(HttpRequest(uri = "https://storage.googleapis.com/openimages/2017_07/images_2017_07.tar.gz")))
           .flatMapConcat(httpResponse => httpResponse.entity.withoutSizeLimit().dataBytes)
+          .via(CacheFile.flow(filename = Paths.get("images_2017_07.tar.gz"),
+            expectedSize = 1038132176L,
+            expectedMd5 = Some(dehexify("9c7d7d1b9c19f72c77ac0fa8e2695e00")),
+            saveFile = true))
           .via(Compression.gunzip())
-          .runWith(FileIO.toPath(Paths.get("images_2017_07.tar")))
-          .onComplete({
-            case Failure(error) =>
-              log.error("Failed: {}", error)
-              System.err.println("Failed: " + error)
-              terminatorActor ! FatalError
-            case Success(_) =>
-              log.info("done downloading tar")
-              context.stop(self)
-              terminatorActor ! FatalError
+          .via(CacheFile.flow(filename = Paths.get("images_2017_07.tar"),
+            expectedSize = 3362037760L,
+            expectedMd5 = Some(dehexify("bff4cdd922f018f343e53e2ffea909f2")),
+            saveFile = true))
+          .toMat(StreamConverters.asInputStream())(Keep.right)
+          .mapMaterializedValue(tarInputStream => {
+            val tarArchiveInputStream = new TarArchiveInputStream(tarInputStream)
+            Source.unfold(tarArchiveInputStream) {
+              tarArchiveInputStream: TarArchiveInputStream =>
+                val nextTarEntry: TarArchiveEntry = tarArchiveInputStream.getNextTarEntry
+                if (nextTarEntry != null)
+                  if (nextTarEntry.isCheckSumOK) {
+                    Some((tarArchiveInputStream, (tarArchiveInputStream, nextTarEntry)))
+                  } else {
+                    throw new TarFileCorruptedException
+                  }
+                else
+                  None
+            }
           })
-      }
-
-      val countCsvEntriesInTar: Boolean = false
-      if (countCsvEntriesInTar) {
-        val tais = new TarArchiveInputStream(new FileInputStream("images_2017_07.tar"))
-
-        val tarEntrySource = Source.unfold(tais) {
-          tarArchiveInputStream =>
-            val nextTarEntry: TarArchiveEntry = tarArchiveInputStream.getNextTarEntry
-            if (nextTarEntry != null)
-              if (nextTarEntry.isCheckSumOK) {
-                Some((tarArchiveInputStream, nextTarEntry))
-              } else {
-                throw new TarFileCorruptedException
-              }
-            else
-              None
-        }
-
-        val foo: Source[Source[ByteString, Future[IOResult]], NotUsed] = tarEntrySource.map(tarEntry => {
-          log.info("tarEntry: {}", tarEntry.getName)
-          println(tarEntry.getName)
-          Paths.get(tarEntry.getName).toFile.mkdirs()
-          StreamConverters.fromInputStream(() => TarEntryInputStream(tais))
-        })
-
-        val bar = foo
-          .log("tar entry").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
-          .flatMapConcat(y => y)
-
-        val baz = bar
-          .via(CsvParsing.lineScanner(CsvParsing.Comma, CsvParsing.DoubleQuote, '\0'))
-          .via(CsvToMap.toMap())
-          .filterNot(line => line("Subset").utf8String == "Subset")
-          .fold(Map[String, Int]().withDefaultValue(0)) { (x, y) =>
-            x.updated(y("Subset").utf8String, x(y("Subset").utf8String) + 1)
-          }
-          .log("csv counts").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
-
-
-        Await.result(baz.runWith(Sink.ignore), Duration.Inf)
-
-      }
-
-      val countLinesInImagesTarGz = false
-
-      if (countLinesInImagesTarGz) {
-        val readFromUrl = false
-
-        val tarInputStream =
-          if (readFromUrl) {
-            Source.fromFuture(
-              Http().singleRequest(HttpRequest(uri = "https://storage.googleapis.com/openimages/2017_07/images_2017_07.tar.gz")))
-              .flatMapConcat(httpResponse => httpResponse.entity.withoutSizeLimit().dataBytes)
-              .via(Compression.gunzip())
-              .runWith(StreamConverters.asInputStream())
-          } else {
-            new FileInputStream("images_2017_07.tar")
-          }
-
-        val tarArchiveInputStream = new TarArchiveInputStream(tarInputStream)
-
-        Await.result(
-          Source.unfold(tarArchiveInputStream) {
-            tarArchiveInputStream =>
-              val nextTarEntry: TarArchiveEntry = tarArchiveInputStream.getNextTarEntry
-              if (nextTarEntry != null)
-                if (nextTarEntry.isCheckSumOK) {
-                  Some((tarArchiveInputStream, nextTarEntry))
-                } else {
-                  throw new TarFileCorruptedException
-                }
-              else
-                None
-          }
-            .log("tar entry").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
-            .map(tarEntry => {
-              log.info("tarEntry: {}", tarEntry.getName)
+          .run()
+          //          .log("tar entry").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
+          .map({
+            case (tarArchiveInputStream, tarEntry) =>
+              log.info("tarEntry.name: {}", tarEntry.getName)
               println(tarEntry.getName)
-              Paths.get(tarEntry.getName).toFile.mkdirs()
+              Paths.get(tarEntry.getName).getParent.toFile.mkdirs()
               StreamConverters.fromInputStream(() => TarEntryInputStream(tarArchiveInputStream))
+                .via(CacheFile.flow(filename = Paths.get(tarEntry.getName), expectedSize = tarEntry.getSize))
                 .via(CsvParsing.lineScanner(CsvParsing.Comma, CsvParsing.DoubleQuote, '\0'))
                 .via(CsvToMap.toMap())
-            })
-            .flatMapConcat(identity)
-            //          .log("csv line").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
-            .fold(Map[String, Int]().withDefaultValue(0)) { (map, csvLine) =>
-            map.updated(csvLine("Subset").utf8String, map(csvLine("Subset").utf8String) + 1)
-          }
-            .log("csv counts").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
-            .runWith(Sink.ignore),
-          Duration.Inf)
+          })
+          .flatMapConcat(identity)
+          //          .log("csv line").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
+          .fold(Map[String, Int]().withDefaultValue(0)) { (map, csvLine) =>
+          map.updated(csvLine("Subset").utf8String, map(csvLine("Subset").utf8String) + 1)
+        }
+          .log("csv counts").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
+          .runWith(Sink.ignore)
 
-      }
+        , Duration.Inf)
 
-//      terminatorActor ! FatalError
+      terminatorActor ! FatalError
+
+    //      val countCsvEntriesInTar: Boolean = false
+    //      if (countCsvEntriesInTar) {
+    //        val tais = new TarArchiveInputStream(new FileInputStream("images_2017_07.tar"))
+    //
+    //        val tarEntrySource = Source.unfold(tais) {
+    //          tarArchiveInputStream =>
+    //            val nextTarEntry: TarArchiveEntry = tarArchiveInputStream.getNextTarEntry
+    //            if (nextTarEntry != null)
+    //              if (nextTarEntry.isCheckSumOK) {
+    //                Some((tarArchiveInputStream, nextTarEntry))
+    //              } else {
+    //                throw new TarFileCorruptedException
+    //              }
+    //            else
+    //              None
+    //        }
+    //
+    //        val foo: Source[Source[ByteString, Future[IOResult]], NotUsed] = tarEntrySource.map(tarEntry => {
+    //          log.info("tarEntry: {}", tarEntry.getName)
+    //          println(tarEntry.getName)
+    //          Paths.get(tarEntry.getName).toFile.mkdirs()
+    //          StreamConverters.fromInputStream(() => TarEntryInputStream(tais))
+    //        })
+    //
+    //        val bar = foo
+    //          .log("tar entry").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
+    //          .flatMapConcat(y => y)
+    //
+    //        val baz = bar
+    //          .via(CsvParsing.lineScanner(CsvParsing.Comma, CsvParsing.DoubleQuote, '\0'))
+    //          .via(CsvToMap.toMap())
+    //          .filterNot(line => line("Subset").utf8String == "Subset")
+    //          .fold(Map[String, Int]().withDefaultValue(0)) { (x, y) =>
+    //            x.updated(y("Subset").utf8String, x(y("Subset").utf8String) + 1)
+    //          }
+    //          .log("csv counts").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
+    //
+    //
+    //        Await.result(baz.runWith(Sink.ignore), Duration.Inf)
+    //
+    //      }
+
+    //      val countLinesInImagesTarGz = false
+    //
+    //      if (countLinesInImagesTarGz) {
+    //        val readFromUrl = false
+    //
+    //        val tarInputStream =
+    //          if (readFromUrl) {
+    //            Source.fromFuture(
+    //              Http().singleRequest(HttpRequest(uri = "https://storage.googleapis.com/openimages/2017_07/images_2017_07.tar.gz")))
+    //              .flatMapConcat(httpResponse => httpResponse.entity.withoutSizeLimit().dataBytes)
+    //              .via(Compression.gunzip())
+    //              .runWith(StreamConverters.asInputStream())
+    //          } else {
+    //            new FileInputStream("images_2017_07.tar")
+    //          }
+    //
+    //        val tarArchiveInputStream = new TarArchiveInputStream(tarInputStream)
+    //
+    //        Await.result(
+    //          Source.unfold(tarArchiveInputStream) {
+    //            tarArchiveInputStream =>
+    //              val nextTarEntry: TarArchiveEntry = tarArchiveInputStream.getNextTarEntry
+    //              if (nextTarEntry != null)
+    //                if (nextTarEntry.isCheckSumOK) {
+    //                  Some((tarArchiveInputStream, nextTarEntry))
+    //                } else {
+    //                  throw new TarFileCorruptedException
+    //                }
+    //              else
+    //                None
+    //          }
+    //            .log("tar entry").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
+    //            .map(tarEntry => {
+    //              log.info("tarEntry: {}", tarEntry.getName)
+    //              println(tarEntry.getName)
+    //              Paths.get(tarEntry.getName).toFile.mkdirs()
+    //              StreamConverters.fromInputStream(() => TarEntryInputStream(tarArchiveInputStream))
+    //                .via(CsvParsing.lineScanner(CsvParsing.Comma, CsvParsing.DoubleQuote, '\0'))
+    //                .via(CsvToMap.toMap())
+    //            })
+    //            .flatMapConcat(identity)
+    //            //          .log("csv line").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
+    //            .fold(Map[String, Int]().withDefaultValue(0)) { (map, csvLine) =>
+    //            map.updated(csvLine("Subset").utf8String, map(csvLine("Subset").utf8String) + 1)
+    //          }
+    //            .log("csv counts").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
+    //            .runWith(Sink.ignore),
+    //          Duration.Inf)
+    //
+    //      }
+
+    //      terminatorActor ! FatalError
 
 
-      val downloadImages: Boolean = true
-
-      if (downloadImages) {
-        FileIO.fromPath(inputCSVFilename)
-          .withAttributes(ActorAttributes.supervisionStrategy(_ => Supervision.Stop))
-          .via(CsvParsing.lineScanner(CsvParsing.Comma, CsvParsing.DoubleQuote, '\0'))
-          .via(CsvToMap.toMap())
-          .map(line => (makeRequest(line), makeDownloadUrlToFile(line, outputDir, checkMd5IfExists)))
-          .mapAsyncUnordered(Runtime.getRuntime.availableProcessors() * 2)(x =>
-            for (nd <- needToDownload(x._2.filePath, x._2.expectedSize, x._2.checkMd5IfExists, x._2.expectedMd5, alwaysDownload))
-              yield (nd, x)
-          )
-          .filter(_._1)
-          .map(_._2)
-          //        .log("pre http").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
-          .alsoTo(Sink.foreach(_ => terminatorActor ! StartDownload))
-          .via(Http().superPool())
-          .watchTermination() {
-            case (_, eventualDone) =>
-              eventualDone.onComplete({
-                case Failure(error) =>
-                  log.error("Failed: {}", error)
-                  System.err.println("Failed: " + error)
-                  terminatorActor ! FatalError
-                case Success(_) =>
-                  log.info("done processing csv")
-                  context.stop(self)
-              })
-          }
-          .to(Sink.actorRef(downloaderActor, InputCsvProcessingEnd))
-          .run()
-      }
+    //      val downloadImages: Boolean = true
+    //
+    //      if (downloadImages) {
+    //        FileIO.fromPath(inputCSVFilename)
+    //          .withAttributes(ActorAttributes.supervisionStrategy(_ => Supervision.Stop))
+    //          .via(CsvParsing.lineScanner(CsvParsing.Comma, CsvParsing.DoubleQuote, '\0'))
+    //          .via(CsvToMap.toMap())
+    //          .map(line => (makeRequest(line), makeDownloadUrlToFile(line, outputDir, checkMd5IfExists)))
+    //          .mapAsyncUnordered(Runtime.getRuntime.availableProcessors() * 2)(x =>
+    //            for (nd <- needToDownload(x._2.filePath, x._2.expectedSize, x._2.checkMd5IfExists, x._2.expectedMd5, alwaysDownload))
+    //              yield (nd, x)
+    //          )
+    //          .filter(_._1)
+    //          .map(_._2)
+    //          //        .log("pre http").withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel))
+    //          .alsoTo(Sink.foreach(_ => terminatorActor ! StartDownload))
+    //          .via(Http().superPool())
+    //          .watchTermination() {
+    //            case (_, eventualDone) =>
+    //              eventualDone.onComplete({
+    //                case Failure(error) =>
+    //                  log.error("Failed: {}", error)
+    //                  System.err.println("Failed: " + error)
+    //                  terminatorActor ! FatalError
+    //                case Success(_) =>
+    //                  log.info("done processing csv")
+    //                  context.stop(self)
+    //              })
+    //          }
+    //          .to(Sink.actorRef(downloaderActor, InputCsvProcessingEnd))
+    //          .run()
+    //      }
   }
 
   class TarFileCorruptedException extends RuntimeException

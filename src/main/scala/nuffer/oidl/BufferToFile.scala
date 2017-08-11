@@ -3,7 +3,7 @@ package nuffer.oidl
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
-import java.nio.file.{Path, StandardOpenOption}
+import java.nio.file.{Files, Path, StandardOpenOption}
 
 import akka.stream.Attributes
 import akka.stream.impl.fusing.GraphStages.SimpleLinearGraphStage
@@ -64,6 +64,11 @@ final case class BufferToFile(filename: Path, chunkSize: Int = 8192) extends Sim
       if (fileInputChan.position() == fileInputChan.size()) {
         completeStage()
       }
+    }
+
+    override def onUpstreamFailure(ex: Throwable): Unit = {
+      super.onUpstreamFailure(ex)
+      Files.deleteIfExists(filename)
     }
 
     setHandlers(in, out, this)

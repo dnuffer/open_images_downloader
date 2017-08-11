@@ -19,6 +19,11 @@ object Utils {
     byteString.map("%02x".format(_)).mkString
   }
 
+  def dehexify(s: String): ByteString = {
+    ByteString(s.sliding(2, 2).map(java.lang.Integer.parseUnsignedInt(_, 16).toByte).toArray)
+  }
+
+
   def broadcastToSinksSingleFuture[InT, Out1T, Out2T](sink1: Sink[InT, Future[Out1T]], sink2: Sink[InT, Future[Out2T]])(implicit ec: ExecutionContext): Sink[InT, Future[(Out1T, Out2T)]] = {
     broadcastToSinks(sink1, sink2).mapMaterializedValue(combineFutures)
   }

@@ -16,6 +16,9 @@ object CacheFile {
            expectedSize: Long,
            expectedMd5: Option[ByteString] = None,
            saveFile: Boolean = true,
+
+          // TODO: honor deleteFileWhenFinished. Maybe implement with a simple pass-through flow that does a delete on completion?
+           deleteFileWhenFinished: Boolean = false,
            chunkSize: Int = 8192)(implicit system: ActorSystem, ec: ExecutionContext): Graph[FlowShape[ByteString, ByteString], NotUsed] = {
     // use cases:
     //   * file exists, expectedMd5==None - use it for input
@@ -37,6 +40,7 @@ object CacheFile {
       case _ => false
     }
 
+    printf("CacheFile.flow filename: %s, fileSizeMatchesExpected: %s\n", filename , fileSizeMatchesExpected)
     //    val canImmediatelyUseFileForInput: Boolean = expectedMd5.isEmpty && fileSizeMatchesExpected
     val canImmediatelyUseFileForInput: Boolean = fileSizeMatchesExpected
 

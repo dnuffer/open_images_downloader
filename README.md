@@ -32,4 +32,4 @@ TODO:
 * retry 500 server errors.
 * command line options to control connection pooling and parallelism.
 * save the images.csv files locally while simultaneously feeding them into the url downloading. Probably by creating a custom graph stage similar to Ops.Buffer but storing the data in a file instead of a memory buffer.
-* resume downloading partially downloaded files? Seems a bit pointless, none of the files are that big. Would be interesting to implement anyway!
+* resume downloading partially downloaded files? Seems a bit pointless, none of the files are that big. Would be interesting to implement anyway! The file images_2017_07.tar.gz is the largest.
