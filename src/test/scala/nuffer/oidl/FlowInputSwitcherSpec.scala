@@ -6,6 +6,7 @@ import akka.stream.scaladsl.{Keep, RunnableGraph, Sink, SinkQueueWithCancel, Sou
 import akka.stream.testkit._
 import akka.util.ByteString
 
+import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
 import scala.concurrent.{Await, Future, Promise}
 import scala.util.Success

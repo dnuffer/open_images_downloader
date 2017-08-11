@@ -10,7 +10,7 @@ import akka.stream.impl.fusing.GraphStages.SimpleLinearGraphStage
 import akka.stream.stage.{GraphStageLogic, InHandler, OutHandler}
 import akka.util.ByteString
 
-final case class BufferToFile(filename: Path, chunkSize: Int = 8192) extends SimpleLinearGraphStage[ByteString] {
+final case class BufferToFile(filename: Path, chunkSize: Int = 8192, deleteFileOnClose: Boolean = false) extends SimpleLinearGraphStage[ByteString] {
 
   override def createLogic(inheritedAttributes: Attributes): GraphStageLogic = new GraphStageLogic(shape) with InHandler with OutHandler {
 
@@ -20,8 +20,14 @@ final case class BufferToFile(filename: Path, chunkSize: Int = 8192) extends Sim
 
     override def preStart(): Unit = {
       fileOutputChan = FileChannel.open(filename, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)
-      fileInputChan = FileChannel.open(filename, StandardOpenOption.READ)
 
+      // the DELETE_ON_CLOSE flag unlinks the file (on Linux) so this open has to happen second otherwise fileOutputChan will use a
+      // separate file.
+      if (deleteFileOnClose) {
+        fileInputChan = FileChannel.open(filename, StandardOpenOption.READ, StandardOpenOption.DELETE_ON_CLOSE)
+      } else {
+        fileInputChan = FileChannel.open(filename, StandardOpenOption.READ)
+      }
       pull(in)
     }
 
@@ -64,11 +70,17 @@ final case class BufferToFile(filename: Path, chunkSize: Int = 8192) extends Sim
       if (fileInputChan.position() == fileInputChan.size()) {
         completeStage()
       }
+      fileOutputChan.close()
     }
 
     override def onUpstreamFailure(ex: Throwable): Unit = {
       super.onUpstreamFailure(ex)
       Files.deleteIfExists(filename)
+    }
+
+    override def onDownstreamFinish(): Unit = {
+      super.onDownstreamFinish()
+      fileInputChan.close()
     }
 
     setHandlers(in, out, this)

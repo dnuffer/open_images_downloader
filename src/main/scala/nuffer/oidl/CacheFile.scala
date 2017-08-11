@@ -4,8 +4,8 @@ import java.nio.file.{Files, Path}
 
 import akka.NotUsed
 import akka.actor.ActorSystem
-import akka.stream._
 import akka.stream.scaladsl.{FileIO, Flow, Sink}
+import akka.stream.{ActorMaterializer, FlowShape, Graph}
 import akka.util.ByteString
 
 import scala.concurrent.{ExecutionContext, Future}
@@ -16,9 +16,7 @@ object CacheFile {
            expectedSize: Long,
            expectedMd5: Option[ByteString] = None,
            saveFile: Boolean = true,
-
-          // TODO: honor deleteFileWhenFinished. Maybe implement with a simple pass-through flow that does a delete on completion?
-           deleteFileWhenFinished: Boolean = false,
+           useSelfDeletingTempFile: Boolean = true,
            chunkSize: Int = 8192)(implicit system: ActorSystem, ec: ExecutionContext): Graph[FlowShape[ByteString, ByteString], NotUsed] = {
     // use cases:
     //   * file exists, expectedMd5==None - use it for input
@@ -79,6 +77,8 @@ object CacheFile {
       //      new CacheFile(filename, expectedSize, expectedMd5, saveFile, chunkSize)
     } else if (saveFile) {
       BufferToFile(filename)
+    } else if (useSelfDeletingTempFile) {
+      BufferToFile(Files.createTempFile("oidl", ".tmp"), deleteFileOnClose = true)
     } else {
       Flow.apply
     }

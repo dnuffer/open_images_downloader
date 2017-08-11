@@ -1,6 +1,6 @@
 package nuffer.oidl
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Path, Paths}
 
 import akka.actor.{Actor, ActorLogging, ActorRef, ActorSystem}
 import akka.event.Logging
@@ -8,15 +8,14 @@ import akka.http.scaladsl.Http
 import akka.http.scaladsl.model.{HttpRequest, Uri}
 import akka.stream._
 import akka.stream.alpakka.csv.scaladsl.{CsvParsing, CsvToMap}
-import akka.stream.scaladsl.{Compression, FileIO, Keep, Sink, Source, StreamConverters}
+import akka.stream.scaladsl.{Compression, Keep, Sink, Source, StreamConverters}
 import akka.util.ByteString
 import nuffer.oidl.Utils._
 import org.apache.commons.compress.archivers.tar.{TarArchiveEntry, TarArchiveInputStream}
 
+import scala.concurrent.Await
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.Duration
-import scala.concurrent.{Await, Future}
-import scala.util.{Failure, Success, Try}
 
 
 case class StartProcessing()
@@ -37,33 +36,33 @@ class InputCsvProcessor(downloaderActor: ActorRef, terminatorActor: ActorRef) ex
       line("OriginalMD5").utf8String, checkMd5IfExists)
   }
 
-  private def needToDownload(filePath: Path, expectedSize: Long, doCheckMd5: Boolean, expectedMd5: String, alwaysDownload: Boolean): Future[Boolean] = {
-    if (alwaysDownload) {
-      Future(true)
-    } else {
-      Try(Files.size(filePath)) match {
-        case Success(size) =>
-          if (size != expectedSize) {
-            Future(true)
-          } else {
-            // the file exists and the size matches, now we need to verify the md5
-            if (doCheckMd5) {
-              val fileSource: Source[ByteString, Future[IOResult]] = FileIO.fromPath(filePath)
-              val md5CalculatorSink: Sink[ByteString, Future[DigestResult]] = DigestCalculator.sink(Algorithm.MD5)
-              fileSource.runWith(md5CalculatorSink).map { md5DigestResult =>
-                log.info("checked md5sum of {}. got {}, expected {}",
-                  filePath, hexify(md5DigestResult.messageDigest), hexify(decodeBase64Md5(expectedMd5)))
-                md5DigestResult.messageDigest != decodeBase64Md5(expectedMd5)
-              }
-            } else {
-              Future(false)
-            }
-          }
-
-        case Failure(_) => Future(true)
-      }
-    }
-  }
+//  private def needToDownload(filePath: Path, expectedSize: Long, doCheckMd5: Boolean, expectedMd5: String, alwaysDownload: Boolean): Future[Boolean] = {
+//    if (alwaysDownload) {
+//      Future(true)
+//    } else {
+//      Try(Files.size(filePath)) match {
+//        case Success(size) =>
+//          if (size != expectedSize) {
+//            Future(true)
+//          } else {
+//            // the file exists and the size matches, now we need to verify the md5
+//            if (doCheckMd5) {
+//              val fileSource: Source[ByteString, Future[IOResult]] = FileIO.fromPath(filePath)
+//              val md5CalculatorSink: Sink[ByteString, Future[DigestResult]] = DigestCalculator.sink(Algorithm.MD5)
+//              fileSource.runWith(md5CalculatorSink).map { md5DigestResult =>
+//                log.info("checked md5sum of {}. got {}, expected {}",
+//                  filePath, hexify(md5DigestResult.messageDigest), hexify(decodeBase64Md5(expectedMd5)))
+//                md5DigestResult.messageDigest != decodeBase64Md5(expectedMd5)
+//              }
+//            } else {
+//              Future(false)
+//            }
+//          }
+//
+//        case Failure(_) => Future(true)
+//      }
+//    }
+//  }
 
   override def receive: Receive = {
     case StartProcessing() =>
@@ -74,12 +73,14 @@ class InputCsvProcessor(downloaderActor: ActorRef, terminatorActor: ActorRef) ex
           .via(CacheFile.flow(filename = Paths.get("images_2017_07.tar.gz"),
             expectedSize = 1038132176L,
             expectedMd5 = Some(dehexify("9c7d7d1b9c19f72c77ac0fa8e2695e00")),
-            saveFile = true))
+            saveFile = true,
+            useSelfDeletingTempFile = true))
           .via(Compression.gunzip())
           .via(CacheFile.flow(filename = Paths.get("images_2017_07.tar"),
             expectedSize = 3362037760L,
             expectedMd5 = Some(dehexify("bff4cdd922f018f343e53e2ffea909f2")),
-            saveFile = true))
+            saveFile = true,
+            useSelfDeletingTempFile = true))
           .toMat(StreamConverters.asInputStream())(Keep.right)
           .mapMaterializedValue(tarInputStream => {
             val tarArchiveInputStream = new TarArchiveInputStream(tarInputStream)
@@ -104,7 +105,10 @@ class InputCsvProcessor(downloaderActor: ActorRef, terminatorActor: ActorRef) ex
               println(tarEntry.getName)
               Paths.get(tarEntry.getName).getParent.toFile.mkdirs()
               StreamConverters.fromInputStream(() => TarEntryInputStream(tarArchiveInputStream))
-                .via(CacheFile.flow(filename = Paths.get(tarEntry.getName), expectedSize = tarEntry.getSize))
+                .via(CacheFile.flow(filename = Paths.get(tarEntry.getName),
+                  expectedSize = tarEntry.getSize,
+                  saveFile = true,
+                  useSelfDeletingTempFile = true))
                 .via(CsvParsing.lineScanner(CsvParsing.Comma, CsvParsing.DoubleQuote, '\0'))
                 .via(CsvToMap.toMap())
           })
