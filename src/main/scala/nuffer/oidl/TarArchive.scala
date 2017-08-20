@@ -2,44 +2,35 @@ package nuffer.oidl
 
 import akka.NotUsed
 import akka.stream._
-import akka.stream.stage.{GraphStage, GraphStageLogic, InHandler, OutHandler}
+import akka.stream.scaladsl.{Flow, GraphDSL, Keep, Sink, Source, StreamConverters}
 import akka.util.ByteString
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry
+import org.apache.commons.compress.archivers.tar.{TarArchiveEntry, TarArchiveInputStream}
 
 class TarFileCorruptedException extends RuntimeException
 
 object TarArchive {
-  def flow(): Graph[FlowShape[ByteString, TarArchiveEntry], NotUsed] = ??? //{
+  def flow(): Graph[FlowShape[ByteString, Source[(TarArchiveInputStream, TarArchiveEntry), NotUsed]], NotUsed] = {
+    val tarSink: Sink[ByteString, Source[(TarArchiveInputStream, TarArchiveEntry), NotUsed]] =
+      Flow[ByteString].toMat(StreamConverters.asInputStream())(Keep.right)
+        .mapMaterializedValue(tarInputStream => {
+          val tarArchiveInputStream = new TarArchiveInputStream(tarInputStream)
+          Source.unfold(tarArchiveInputStream) {
+            tarArchiveInputStream: TarArchiveInputStream =>
+              val nextTarEntry: TarArchiveEntry = tarArchiveInputStream.getNextTarEntry
+              if (nextTarEntry != null)
+                if (nextTarEntry.isCheckSumOK) {
+                  Some((tarArchiveInputStream, (tarArchiveInputStream, nextTarEntry)))
+                } else {
+                  throw new TarFileCorruptedException
+                }
+              else
+                None
+          }
+        })
 
-    //    val inputSink: Sink[ByteString, InputStream] = StreamConverters.asInputStream()
-    //    inputSink.mapMaterializedValue()
-    //    val tarInputStream: InputStream = source.runWith(inputSink)
-    //    val tarArchiveInputStream = new TarArchiveInputStream(tarInputStream)
-    //    val tarEntriesSource: Source[TarArchiveEntry, NotUsed] = Source.unfold(tarArchiveInputStream) {
-    //      tarArchiveInputStream =>
-    //        val nextTarEntry: TarArchiveEntry = tarArchiveInputStream.getNextTarEntry
-    //        if (nextTarEntry != null)
-    //          if (nextTarEntry.isCheckSumOK) {
-    //            Some((tarArchiveInputStream, nextTarEntry))
-    //          } else {
-    //            throw new TarFileCorruptedException
-    //          }
-    //        else
-    //          None
-    //    }
-    //    Flow.fromSinkAndSource(input, tarEntriesSource)
-    //    fromGraph(GraphDSL.create(sink, source)(combine) { implicit b ⇒ (in, out) ⇒ FlowShape(in.in, out.out) })
-//  }
-}
-
-class TarArchive extends GraphStage[FlowShape[ByteString, TarArchiveEntry]] {
-  val in = Inlet[ByteString]("TarArchive.in")
-  val out = Outlet[TarArchiveEntry]("TarArchive.out")
-  override val shape = FlowShape(in, out)
-
-  override def createLogic(inheritedAttributes: Attributes): GraphStageLogic = new GraphStageLogic(shape) with InHandler with OutHandler {
-    override def onPush(): Unit = ???
-
-    override def onPull(): Unit = ???
+    Flow.fromGraph(GraphDSL.create(tarSink) { implicit builder => tarSink2 =>
+      val materializedValue: Outlet[Source[(TarArchiveInputStream, TarArchiveEntry), NotUsed]] = builder.materializedValue
+      FlowShape(tarSink2.in, materializedValue)
+    }).mapMaterializedValue(_ => NotUsed)
   }
 }

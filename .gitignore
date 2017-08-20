@@ -50,3 +50,10 @@ fabric.properties
 /images/
 /test10images.csv
 /.idea/
+/1000-test-images
+/2017_07
+/images_2017_07.tar*
+/test100images.csv
+/testfile
+/target
+/project/target

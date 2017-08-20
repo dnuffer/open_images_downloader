@@ -46,6 +46,7 @@ class Terminator() extends Actor with ActorLogging {
 //    val connectionPoolClientIdleTimeout: Long = context.system.settings.config.getDuration("akka.http.host-connection-pool.client.idle-timeout", TimeUnit.MILLISECONDS)
 //    log.info("Waiting for idle timeouts: {} + {} = {}", connectionPoolIdleTimeout, connectionPoolClientIdleTimeout, connectionPoolIdleTimeout + connectionPoolClientIdleTimeout)
 //    Thread.sleep(connectionPoolIdleTimeout + connectionPoolClientIdleTimeout)
+    Thread.sleep(10000)
     log.info("http.shutdownAllConnectionPools()")
     Http().shutdownAllConnectionPools().onComplete({ _ =>
 //      log.info("materializer.shutdown()")
