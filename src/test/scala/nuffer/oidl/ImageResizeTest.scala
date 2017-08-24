@@ -12,7 +12,7 @@ import akka.util.ByteString
 import org.im4java.core.{ConvertCmd, IMOperation}
 import org.im4java.process.Pipe
 
-import scala.concurrent.ExecutionContext
+import scala.concurrent.{ExecutionContext, ExecutionContextExecutor}
 //import magick.{ImageInfo, MagickImage}
 //import org.libjpegturbo.turbojpeg.{TJCompressor, TJDecompressor}
 
@@ -145,7 +145,7 @@ class ImageResizeTest extends StreamSpec {
     "scala process convert parallel" in {
       time("convert resize") {
         // need an unlimited size thread pool for blocking io threads.
-        implicit val ec = ExecutionContext.fromExecutor(java.util.concurrent.Executors.newCachedThreadPool())
+        implicit val ec: ExecutionContextExecutor = ExecutionContext.fromExecutor(java.util.concurrent.Executors.newCachedThreadPool())
         for (imageBytesList <- imagesBytes.grouped(200)) {
           //          println("waiting for result")
           val res = Await.result(

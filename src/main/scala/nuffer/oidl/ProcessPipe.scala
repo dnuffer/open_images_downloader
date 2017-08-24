@@ -1,6 +1,6 @@
 package nuffer.oidl
 
-import java.io.{IOException, InputStream}
+import java.io.InputStream
 
 import akka.Done
 import akka.stream.QueueOfferResult.{Dropped, Enqueued, QueueClosed}
@@ -20,30 +20,29 @@ object ProcessPipe {
 
   case class ProcessFailedException(command: String, exitCode: Int, stderr: ByteString = ByteString()) extends RuntimeException
 
-  def transferFully(in: InputStream, out: SourceQueueWithComplete[ByteString]) {
+  def transferFully(inStream: InputStream, outQueue: SourceQueueWithComplete[ByteString]) {
 
     def asyncLoop(): Future[Done] =
       Future {
         blocking {
           try {
             val buffer = new Array[Byte](BufferSize)
-            val bytesRead = in.read(buffer)
+            val bytesRead = inStream.read(buffer)
             if (bytesRead == -1) {
               Success(None)
             } else
               Success(Some(ByteString(buffer.take(bytesRead))))
           } catch {
-            case ex: IOException =>
-              out.fail(ex)
-              Failure(ex)
-            case ex: Throwable => Failure(ex)
+            case exception: Throwable => Failure(exception)
           }
         }
       }(ec)
         .flatMap {
-          case Success(Some(bytes)) => out.offer(bytes)
-          case Success(None) => Future(out.complete()) // upstream reached EOF, so complete the out queue
-          case Failure(exception) => Future.failed(exception) // upstream exception         }
+          case Success(Some(bytes)) => outQueue.offer(bytes)
+          case Success(None) => Future(outQueue.complete()) // upstream reached EOF, so complete the out queue
+          case Failure(exception) =>
+            outQueue.fail(exception)
+            Future.failed(exception) // upstream exception
         }
         .flatMap {
           case Enqueued => asyncLoop() // passed along data, try to read more
@@ -57,22 +56,19 @@ object ProcessPipe {
       Await.result(asyncLoop(), Duration.Inf)
     }
     finally {
-      in.close()
+      inStream.close()
     }
   }
 
   def throughProcessCheckForError(command: String)(implicit materializer: Materializer): Flow[ByteString, ByteString, Future[Done]] = {
-    Flow.fromSinkAndSourceMat(Sink.queue[ByteString](), Source.queue[ByteString](1, OverflowStrategy.backpressure))((iq, oq) => Future {
+    Flow.fromSinkAndSourceMat(Sink.queue[ByteString](), Source.queue[ByteString](1, OverflowStrategy.backpressure))((stdinQueue, stdoutQueue) => Future {
       blocking {
-
-        type JProcess = java.lang.Process
-        type JProcessBuilder = java.lang.ProcessBuilder
-        val proc: JProcess = new JProcessBuilder(command.split("""\s+"""): _*).start()
+        val proc: java.lang.Process = new java.lang.ProcessBuilder(command.split("""\s+"""): _*).start()
 
         val stdinThread = new Thread {
           try {
             def pull(): Future[Done] = {
-              iq.pull() flatMap {
+              stdinQueue.pull() flatMap {
                 case None =>
                   proc.getOutputStream.close()
                   Future.successful(Done)
@@ -81,31 +77,31 @@ object ProcessPipe {
                   pull()
               }
             }
-
             Await.result(pull(), Duration.Inf)
           } catch {
             case exception: Throwable =>
               proc.getOutputStream.close()
-              oq.fail(exception)
+              stdoutQueue.fail(exception)
               proc.destroyForcibly()
           }
         }
         stdinThread.start()
 
         val stdoutThread = new Thread {
-          transferFully(proc.getInputStream, oq)
+          transferFully(proc.getInputStream, stdoutQueue)
         }
         stdoutThread.start()
 
-        // make es a sink with a limit, and a queue
-        val (es: SourceQueueWithComplete[ByteString], futureEsOut: Future[Option[ByteString]]) = Source.queue[ByteString](1, OverflowStrategy.backpressure)
-          .batchWeighted(1024 * 1024, _.size, Vector(_))(_ :+ _) // accumulate up to 1 MB of stderr in a Vector[ByteString]
-          .take(1) // this prevents the us from accumulating more than 1 MB.
-          .map((vbs: Vector[ByteString]) => vbs.fold(ByteString())(_ ++ _)) // flatten the vector back to a single ByteString
-          .toMat(Sink.headOption)((_, _)) // keep the first ByteString and the queue to use for stderr
-          .run()
+        // make stderrQueue a sink with a limit, and a queue
+        val (stderrQueue: SourceQueueWithComplete[ByteString], futureStderrBytes: Future[Option[ByteString]]) =
+          Source.queue[ByteString](1, OverflowStrategy.backpressure)
+            .batchWeighted(1024 * 1024, _.size, Vector(_))(_ :+ _) // accumulate up to 1 MB of stderr in a Vector[ByteString]
+            .take(1) // this prevents the us from accumulating more than 1 MB.
+            .map(_.fold(ByteString())(_ ++ _)) // flatten the vector back to a single ByteString
+            .toMat(Sink.headOption)((_, _)) // keep the first ByteString and the queue to use for stderr
+            .run()
         val stderrThread = new Thread {
-          transferFully(proc.getErrorStream, es)
+          transferFully(proc.getErrorStream, stderrQueue)
         }
         stderrThread.start()
 
@@ -116,7 +112,8 @@ object ProcessPipe {
         val exitCode: Int = proc.exitValue()
 
         if (exitCode != 0) {
-          throw ProcessFailedException(command, exitCode, Await.result(futureEsOut, Duration.Inf).getOrElse(ByteString()))
+          val errStr = Await.result(futureStderrBytes, Duration.Inf).getOrElse(ByteString())
+          throw ProcessFailedException(command, exitCode, errStr)
         }
 
         Done

@@ -16,7 +16,7 @@ import scala.util.{Failure, Success}
 
 case class DownloadUrlToFile(url: String, filePath: Path, expectedSize: Long, expectedMd5: String, checkMd5IfExists: Boolean)
 
-class Downloader(terminatorActor: ActorRef, http: HttpExt) extends Actor
+class DownloadActor(terminatorActor: ActorRef, http: HttpExt) extends Actor
   with ActorLogging {
 
   import context.dispatcher

@@ -1,6 +1,7 @@
 package nuffer.oidl
 
-import akka.actor.{ActorSystem, Props}
+import akka.actor.ActorSystem
+import akka.event.Logging
 import akka.http.scaladsl.Http
 import akka.stream.ActorMaterializer
 import com.typesafe.config.{ConfigFactory, ConfigValueFactory}
@@ -31,13 +32,25 @@ object Main extends App {
   implicit val materializer = ActorMaterializer()
   implicit val executionContext = system.dispatcher
   val http = Http(system)
+  val log = Logging(system, this.getClass)
+
+  val director = Director()
+  director.run().onComplete({
+    _ =>
+      Http().shutdownAllConnectionPools().onComplete({ _ =>
+        log.info("sleeping")
+        Thread.sleep(10000)
+        log.info("context.system.terminate()")
+        system.terminate()
+      })
+  })
 
 
-  val terminatorActor = system.actorOf(Props(classOf[Terminator]), "Terminator")
-  val downloaderActor = system.actorOf(Props(classOf[Downloader], terminatorActor, http), name = "Downloader")
-  val inputCsvProcessorActor = system.actorOf(Props(classOf[InputCsvProcessor], downloaderActor, terminatorActor), name = "InputCsvProcessor")
+//  val terminatorActor = system.actorOf(Props(classOf[Terminator]), "Terminator")
+//  val downloaderActor = system.actorOf(Props(classOf[DownloadActor], terminatorActor, http), name = "Downloader")
+//  val inputCsvProcessorActor = system.actorOf(Props(classOf[InputCsvProcessor], downloaderActor, terminatorActor), name = "InputCsvProcessor")
 
 //  inputCsvProcessorActor ! StartProcessingInputCsv(Paths.get(conf.imagesCsv()), Paths.get(conf.originalImagesDir()), conf.checkMd5IfExists(),
 //    conf.alwaysDownload())
-  inputCsvProcessorActor ! StartProcessing()
+//  inputCsvProcessorActor ! StartProcessing()
 }
