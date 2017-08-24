@@ -23,6 +23,8 @@ import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
 import scala.util.{Failure, Success, Try}
 
+case class DownloadUrlToFile(url: String, filePath: Path, expectedSize: Long, expectedMd5: String, checkMd5IfExists: Boolean)
+
 case class Director(implicit system: ActorSystem) {
   val log = Logging(system, this.getClass)
   final implicit val materializer: ActorMaterializer = ActorMaterializer()
@@ -42,7 +44,7 @@ case class Director(implicit system: ActorSystem) {
     tarArchiveEntrySource
       .via(alsoToEagerCancelGraph(createDirsForEntrySink)) // don't use .alsoTo(), use Broadcast( , eagerCancel=true) to avoid consuming the entire input stream when downstream cancels.
       .flatMapConcat(tarArchiveEntryToCsvLines)
-      .take(1000) // for testing purposes, limit to 10
+      .take(1000) // for testing purposes, limit to 1000
       .alsoTo(countAndPrintNumberOfLinesPerType)
       .map(makeDownloadRequestTuple(checkMd5IfExists, _))
       .via(filterNeedToDownload(alwaysDownload))
@@ -81,18 +83,15 @@ case class Director(implicit system: ActorSystem) {
                   })
               } else {
                 log.error("{}: server size ({}) doesn't match expected size ({})!", url, serverSize, expectedSize)
-                resp.entity.discardBytes()
-                Future.successful(Failure(InvalidSizeException(url, serverSize, expectedSize)))
+                resp.entity.discardBytes().future().map(_ => Failure(InvalidSizeException(url, serverSize, expectedSize)))
               }
             case None =>
               log.error("{}: No Content-Length!", url)
-              resp.entity.discardBytes()
-              Future.successful(Failure(NoContentLengthHeaderException(url)))
+              resp.entity.discardBytes().future().map(_ => Failure(NoContentLengthHeaderException(url)))
           }
         case _ =>
           log.error("{}: Content-Type != image/jpeg", url)
-          resp.entity.discardBytes()
-          Future.successful(Failure(ContentTypeNotJpegException(url)))
+          resp.entity.discardBytes().future().map(_ => Failure(ContentTypeNotJpegException(url)))
       }
 
 
@@ -103,15 +102,11 @@ case class Director(implicit system: ActorSystem) {
           log.info("{}: location: {}", downloadParam.url, location)
           if (location.uri.path.toString().endsWith("/photo_unavailable.png") || location.uri.path.toString.endsWith("/photo_unavailable_l.png")) {
             log.info("Got a photo unavailable redirect.")
-            resp.entity.discardBytes()
-          } else {
-            resp.entity.discardBytes()
           }
         case None =>
           log.error("{}: Got redirect without Location header", downloadParam.url)
-          resp.entity.discardBytes()
       }
-      Future.successful(Failure(RedirectResponseException(downloadParam.url)))
+      resp.entity.discardBytes().future().map(_ => Failure(RedirectResponseException(downloadParam.url)))
 
     // handle failures
     case (Success(resp@HttpResponse(code, _, _, _)), downloadParam: DownloadUrlToFile) =>
