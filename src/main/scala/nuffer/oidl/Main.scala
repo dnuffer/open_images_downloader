@@ -38,8 +38,8 @@ object Main extends App {
   director.run().onComplete({
     _ =>
       Http().shutdownAllConnectionPools().onComplete({ _ =>
-        log.info("sleeping")
-        Thread.sleep(10000)
+//        log.info("sleeping")
+//        Thread.sleep(10000)
         log.info("context.system.terminate()")
         system.terminate()
       })

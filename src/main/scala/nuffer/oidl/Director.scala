@@ -42,7 +42,7 @@ case class Director(implicit system: ActorSystem) {
     tarArchiveEntrySource
       .via(alsoToEagerCancelGraph(createDirsForEntrySink)) // don't use .alsoTo(), use Broadcast( , eagerCancel=true) to avoid consuming the entire input stream when downstream cancels.
       .flatMapConcat(tarArchiveEntryToCsvLines)
-      .take(10) // for testing purposes, limit to 10
+      .take(1000) // for testing purposes, limit to 10
       .alsoTo(countAndPrintNumberOfLinesPerType)
       .map(makeDownloadRequestTuple(checkMd5IfExists, _))
       .via(filterNeedToDownload(alwaysDownload))
@@ -50,10 +50,6 @@ case class Director(implicit system: ActorSystem) {
       .mapAsyncUnordered(100)(processDownload)
       .watchTermination()(makeTerminationHandler)
       .runForeach(downloadComplete())
-    //      .runForeach(println)
-    //      .to(Sink.actorRef(downloaderActor, InputCsvProcessingEnd))
-    //      .run()
-
   }
 
   private def processDownload: ((Try[HttpResponse], DownloadUrlToFile)) => Future[Try[(IOResult, DigestResult, DownloadUrlToFile)]] = {
@@ -86,17 +82,17 @@ case class Director(implicit system: ActorSystem) {
               } else {
                 log.error("{}: server size ({}) doesn't match expected size ({})!", url, serverSize, expectedSize)
                 resp.entity.discardBytes()
-                Future.failed(InvalidSizeException(url, serverSize, expectedSize))
+                Future.successful(Failure(InvalidSizeException(url, serverSize, expectedSize)))
               }
             case None =>
               log.error("{}: No Content-Length!", url)
               resp.entity.discardBytes()
-              Future.failed(NoContentLengthHeaderException(url))
+              Future.successful(Failure(NoContentLengthHeaderException(url)))
           }
         case _ =>
           log.error("{}: Content-Type != image/jpeg", url)
           resp.entity.discardBytes()
-          Future.failed(ContentTypeNotJpegException(url))
+          Future.successful(Failure(ContentTypeNotJpegException(url)))
       }
 
 
@@ -115,19 +111,19 @@ case class Director(implicit system: ActorSystem) {
           log.error("{}: Got redirect without Location header", downloadParam.url)
           resp.entity.discardBytes()
       }
-      Future.failed(RedirectResponseException(downloadParam.url))
+      Future.successful(Failure(RedirectResponseException(downloadParam.url)))
 
     // handle failures
     case (Success(resp@HttpResponse(code, _, _, _)), downloadParam: DownloadUrlToFile) =>
       log.error("{}: Request failed, response code: {}", downloadParam.url, code)
       resp.entity.dataBytes.take(1024 * 1024).runFold(ByteString(""))(_ ++ _).map { body =>
         log.error("{}: failure body: {}", downloadParam.url, body.utf8String)
-        throw RequestFailedException(downloadParam.url, body.utf8String)
+        Failure(RequestFailedException(downloadParam.url, body.utf8String))
       }
 
     case (Failure(exception), downloadParam: DownloadUrlToFile) =>
       log.error("{}: Request failed: {}", downloadParam.url, exception)
-      Future.failed(exception)
+      Future.successful(Failure(exception))
 
   }
 
@@ -151,7 +147,7 @@ case class Director(implicit system: ActorSystem) {
         log.info("Deleted {}", downloadParams.filePath)
       }
     case Failure(exception) =>
-      log.error("Unknown failure: {}", exception)
+      log.error("Download failure: {}", exception)
   }
 
   private def resizeImageAndSaveToFile(filePath: Path): Sink[ByteString, Future[Done]] = {
