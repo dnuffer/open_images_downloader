@@ -44,13 +44,4 @@ object Main extends App {
         system.terminate()
       })
   })
-
-
-//  val terminatorActor = system.actorOf(Props(classOf[Terminator]), "Terminator")
-//  val downloaderActor = system.actorOf(Props(classOf[DownloadActor], terminatorActor, http), name = "Downloader")
-//  val inputCsvProcessorActor = system.actorOf(Props(classOf[InputCsvProcessor], downloaderActor, terminatorActor), name = "InputCsvProcessor")
-
-//  inputCsvProcessorActor ! StartProcessingInputCsv(Paths.get(conf.imagesCsv()), Paths.get(conf.originalImagesDir()), conf.checkMd5IfExists(),
-//    conf.alwaysDownload())
-//  inputCsvProcessorActor ! StartProcessing()
 }

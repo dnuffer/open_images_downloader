@@ -44,54 +44,69 @@ case class Director(implicit system: ActorSystem) {
     tarArchiveEntrySource
       .via(alsoToEagerCancelGraph(createDirsForEntrySink)) // don't use .alsoTo(), use Broadcast( , eagerCancel=true) to avoid consuming the entire input stream when downstream cancels.
       .flatMapConcat(tarArchiveEntryToCsvLines)
-      .take(1000) // for testing purposes, limit to 1000
+      .take(100) // for testing purposes, limit to 100
       .alsoTo(countAndPrintNumberOfLinesPerType)
       .map(makeDownloadRequestTuple(checkMd5IfExists, _))
       .via(filterNeedToDownload(alwaysDownload))
       .via(Http().superPool())
-      .mapAsyncUnordered(100)(processDownload)
+      .mapAsyncUnordered(100)(processHttpResponse)
+      .filter(keepSuccess)
+      .mapAsyncUnordered(100)(processJpegBytes)
       .watchTermination()(makeTerminationHandler)
       .runForeach(downloadComplete())
   }
 
-  private def processDownload: ((Try[HttpResponse], DownloadUrlToFile)) => Future[Try[(IOResult, DigestResult, DownloadUrlToFile)]] = {
+  private def processJpegBytes: (Try[(Source[ByteString, Any], DownloadUrlToFile)]) => Future[Try[(IOResult, DigestResult, DownloadUrlToFile)]] = {
+    case Success((dataBytes, downloadParams)) =>
+      val tupleOfFutures = dataBytes
+        .alsoToMat(resizeImageAndSaveToFile(downloadParams.filePath))(Keep.right)
+        .toMat(saveToFileAndComputeMd5(downloadParams.filePath))(Keep.both)
+        .run()
+
+      // need to wait for the resize and save file to finish, so create a joined future
+      val joinedFuture = for {v1 <- tupleOfFutures._1; v2 <- tupleOfFutures._2} yield (v1, v2)
+
+      // convert it to a Try and include downloadParams.
+      joinedFuture
+        .map({
+          case (done, (ioResult, digestResult)) => Success((ioResult, digestResult, downloadParams))
+        })
+        .recover({
+          case exception => Failure(exception)
+        })
+    case Failure(exception) =>
+      Future.failed(exception)
+  }
+
+  private def keepSuccess[T] : (Try[T]) => Boolean = {
+    case Success(_) => true
+    case _ => false
+  }
+
+  val MTU_BYTES: Long = 1500
+  private def processHttpResponse: ((Try[HttpResponse], DownloadUrlToFile)) => Future[Try[(Source[ByteString, Any], DownloadUrlToFile)]] = {
 
     // server replied with a 200 OK
-    case (Success(resp@HttpResponse(StatusCodes.OK, headers, entity1, _)), downloadParams@DownloadUrlToFile(url: String, filePath: Path, expectedSize: Long, expectedMd5: String, checkMd5IfExists: Boolean)) =>
+    case (Success(HttpResponse(StatusCodes.OK, _, entity1, _)), downloadParams@DownloadUrlToFile(url: String, _: Path, expectedSize: Long, _: String, _: Boolean)) =>
       log.info("{} OK. Content-Type: {}", url, entity1.contentType)
-      val entity = entity1.withoutSizeLimit()
+      val entity = entity1.withSizeLimit(expectedSize)
       entity.contentType match {
         case Binary(MediaTypes.`image/jpeg`) =>
           entity.contentLengthOption match {
             case Some(serverSize) =>
               if (serverSize == expectedSize) {
-                val tupleOfFutures = entity.dataBytes
-                  .alsoToMat(resizeImageAndSaveToFile(filePath))(Keep.right)
-                  .toMat(saveToFileAndComputeMd5(filePath))(Keep.both)
-                  .run()
-
-                // need to wait for the resize and save file to finish, so create a joined future
-                val joinedFuture = for {v1 <- tupleOfFutures._1; v2 <- tupleOfFutures._2} yield (v1, v2)
-
-                // convert it to a Try and include downloadParams.
-                joinedFuture
-                  .map({
-                    case (done, (ioResult, digestResult)) => Success((ioResult, digestResult, downloadParams))
-                  })
-                  .recover({
-                    case t => Failure(t)
-                  })
+                Future(Success(entity.dataBytes, downloadParams))
               } else {
                 log.error("{}: server size ({}) doesn't match expected size ({})!", url, serverSize, expectedSize)
-                resp.entity.discardBytes().future().map(_ => Failure(InvalidSizeException(url, serverSize, expectedSize)))
+                handleResponseError(entity, InvalidSizeException(url, serverSize, expectedSize))
               }
             case None =>
               log.error("{}: No Content-Length!", url)
-              resp.entity.discardBytes().future().map(_ => Failure(NoContentLengthHeaderException(url)))
+              handleResponseError(entity, NoContentLengthHeaderException(url))
           }
         case _ =>
           log.error("{}: Content-Type != image/jpeg", url)
-          resp.entity.discardBytes().future().map(_ => Failure(ContentTypeNotJpegException(url)))
+          handleResponseError(entity, ContentTypeNotJpegException(url))
       }
 
 
@@ -106,20 +121,25 @@ case class Director(implicit system: ActorSystem) {
         case None =>
           log.error("{}: Got redirect without Location header", downloadParam.url)
       }
-      resp.entity.discardBytes().future().map(_ => Failure(RedirectResponseException(downloadParam.url)))
+      handleResponseError(resp.entity, RedirectResponseException(downloadParam.url))
 
     // handle failures
     case (Success(resp@HttpResponse(code, _, _, _)), downloadParam: DownloadUrlToFile) =>
       log.error("{}: Request failed, response code: {}", downloadParam.url, code)
-      resp.entity.dataBytes.take(1024 * 1024).runFold(ByteString(""))(_ ++ _).map { body =>
+      resp.entity.withSizeLimit(1024 * 1024).dataBytes.take(1024 * 1024).runFold(ByteString(""))(_ ++ _).map { body =>
         log.error("{}: failure body: {}", downloadParam.url, body.utf8String)
         Failure(RequestFailedException(downloadParam.url, body.utf8String))
+      } recover {
+        case _ => Failure(RequestFailedException(downloadParam.url, ""))
       }
 
     case (Failure(exception), downloadParam: DownloadUrlToFile) =>
       log.error("{}: Request failed: {}", downloadParam.url, exception)
       Future.successful(Failure(exception))
+  }
 
+  private def handleResponseError(entity: ResponseEntity, exception: Throwable) = {
+    entity.withSizeLimit(MTU_BYTES).discardBytes().future().transform(_ => Success(Failure(exception)))
   }
 
   private def downloadComplete(): (Try[(IOResult, DigestResult, DownloadUrlToFile)]) => Unit = {
@@ -186,8 +206,8 @@ case class Director(implicit system: ActorSystem) {
     case (_, eventualDone: Future[Done]) =>
       eventualDone.onComplete({
         case Failure(error) =>
-          log.error("Failed: {}", error)
-          System.err.println("Failed: " + error)
+          log.error("Graph termination handler. Failed: {}", error)
+          System.err.println("\nGraph termination handler. Failed: " + error)
         case Success(_) =>
           log.info("done processing csv")
       })
