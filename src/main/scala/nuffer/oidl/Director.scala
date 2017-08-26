@@ -23,7 +23,9 @@ import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
 import scala.util.{Failure, Success, Try}
 
-case class DownloadUrlToFile(url: String, filePath: Path, expectedSize: Long, expectedMd5: String, checkMd5IfExists: Boolean)
+case class DownloadParams(url: String, filePath: Path, expectedSize: Long, expectedMd5: String, checkMd5IfExists: Boolean)
+
+case class ImageProcessingState(downloadParams: DownloadParams, needToDownload: Boolean)
 
 case class Director(implicit system: ActorSystem) {
   val log = Logging(system, this.getClass)
@@ -31,7 +33,7 @@ case class Director(implicit system: ActorSystem) {
 
   def run(): Future[Done] = {
     val checkMd5IfExists = false
-    val alwaysDownload = true
+    val alwaysDownload = false
 
     val tarSource: Source[ByteString, NotUsed] = images_2017_07_tar_gz_source
       .withAttributes(ActorAttributes.supervisionStrategy(_ => Supervision.Stop))
@@ -44,23 +46,39 @@ case class Director(implicit system: ActorSystem) {
     tarArchiveEntrySource
       .via(alsoToEagerCancelGraph(createDirsForEntrySink)) // don't use .alsoTo(), use Broadcast( , eagerCancel=true) to avoid consuming the entire input stream when downstream cancels.
       .flatMapConcat(tarArchiveEntryToCsvLines)
-      .take(100) // for testing purposes, limit to 100
+      .take(200) // for testing purposes, limit to 100
       .alsoTo(countAndPrintNumberOfLinesPerType)
       .map(makeDownloadRequestTuple(checkMd5IfExists, _))
-      .via(filterNeedToDownload(alwaysDownload))
-      .via(Http().superPool())
-      .mapAsyncUnordered(100)(processHttpResponse)
+      .via(mapNeedToDownloadRequest(alwaysDownload))
+      .via(startDownloadOrFromFile)
       .filter(keepSuccess)
-      .mapAsyncUnordered(100)(processJpegBytes)
+      .mapAsyncUnordered(100 /* TODO: make this the same size as the number of http streams */)(processJpegBytes)
+      .via(Flow.fromFunction(processMd5Result))
       .watchTermination()(makeTerminationHandler)
-      .runForeach(downloadComplete())
+      .runWith(Sink.foreach(println))
   }
 
-  private def processJpegBytes: (Try[(Source[ByteString, Any], DownloadUrlToFile)]) => Future[Try[(IOResult, DigestResult, DownloadUrlToFile)]] = {
-    case Success((dataBytes, downloadParams)) =>
+  private def startDownloadOrFromFile = {
+    IfThenElse.flow(
+      {
+        case (request: HttpRequest, state: ImageProcessingState) => state.needToDownload
+      },
+      Flow[(HttpRequest, ImageProcessingState)]
+        .via(Http().superPool())
+        .mapAsyncUnordered(100 /* TODO: make this the same size as the number of http streams */)(processHttpResponse)
+      ,
+      Flow[(HttpRequest, ImageProcessingState)].map({
+        case (request: HttpRequest, state: ImageProcessingState) =>
+          Success((FileIO.fromPath(state.downloadParams.filePath), state))
+      })
+    )
+  }
+
+  private def processJpegBytes: (Try[(Source[ByteString, Any], ImageProcessingState)]) => Future[Try[(IOResult, DigestResult, ImageProcessingState)]] = {
+    case Success((dataBytes, state@ImageProcessingState(downloadParams, _))) =>
       val tupleOfFutures = dataBytes
-        .alsoToMat(resizeImageAndSaveToFile(downloadParams.filePath))(Keep.right)
-        .toMat(saveToFileAndComputeMd5(downloadParams.filePath))(Keep.both)
+        .alsoToMat(resizeImageAndSaveToFile(resizedImagePath(downloadParams.filePath)))(Keep.right)
+        .toMat(saveToFileIfNotPresentAndComputeMd5(downloadParams.filePath, state.needToDownload))(Keep.both)
         .run()
 
       // need to wait for the resize and save file to finish, so create a joined future
@@ -69,7 +87,7 @@ case class Director(implicit system: ActorSystem) {
       // convert it to a Try and include downloadParams.
       joinedFuture
         .map({
-          case (done, (ioResult, digestResult)) => Success((ioResult, digestResult, downloadParams))
+          case (done, (ioResult, digestResult)) => Success((ioResult, digestResult, state))
         })
         .recover({
           case exception => Failure(exception)
@@ -78,16 +96,15 @@ case class Director(implicit system: ActorSystem) {
       Future.failed(exception)
   }
 
-  private def keepSuccess[T] : (Try[T]) => Boolean = {
+  private def keepSuccess[T]: (Try[T]) => Boolean = {
     case Success(_) => true
     case _ => false
   }
 
-  val MTU_BYTES: Long = 1500
-  private def processHttpResponse: ((Try[HttpResponse], DownloadUrlToFile)) => Future[Try[(Source[ByteString, Any], DownloadUrlToFile)]] = {
+  private def processHttpResponse: ((Try[HttpResponse], ImageProcessingState)) => Future[Try[(Source[ByteString, Any], ImageProcessingState)]] = {
 
     // server replied with a 200 OK
-    case (Success(HttpResponse(StatusCodes.OK, _, entity1, _)), downloadParams@DownloadUrlToFile(url: String, _: Path, expectedSize: Long, _: String, _: Boolean)) =>
+    case (Success(HttpResponse(StatusCodes.OK, _, entity1, _)), state@ImageProcessingState(downloadParams@DownloadParams(url: String, _: Path, expectedSize: Long, _: String, _: Boolean), _)) =>
       log.info("{} OK. Content-Type: {}", url, entity1.contentType)
       val entity = entity1.withSizeLimit(expectedSize)
       entity.contentType match {
@@ -95,7 +112,7 @@ case class Director(implicit system: ActorSystem) {
           entity.contentLengthOption match {
             case Some(serverSize) =>
               if (serverSize == expectedSize) {
-                Future(Success(entity.dataBytes, downloadParams))
+                Future(Success(entity.dataBytes, state))
               } else {
                 log.error("{}: server size ({}) doesn't match expected size ({})!", url, serverSize, expectedSize)
                 handleResponseError(entity, InvalidSizeException(url, serverSize, expectedSize))
@@ -111,39 +128,42 @@ case class Director(implicit system: ActorSystem) {
 
 
     // handle redirects
-    case (Success(resp@HttpResponse(Redirection(_), _, _, _)), downloadParam: DownloadUrlToFile) =>
+    case (Success(resp@HttpResponse(Redirection(_), _, _, _)), state@ImageProcessingState(downloadParams, _)) =>
       resp.header[Location] match {
         case Some(location) =>
-          log.info("{}: location: {}", downloadParam.url, location)
+          log.info("{}: location: {}", downloadParams.url, location)
           if (location.uri.path.toString().endsWith("/photo_unavailable.png") || location.uri.path.toString.endsWith("/photo_unavailable_l.png")) {
             log.info("Got a photo unavailable redirect.")
           }
         case None =>
-          log.error("{}: Got redirect without Location header", downloadParam.url)
+          log.error("{}: Got redirect without Location header", downloadParams.url)
       }
-      handleResponseError(resp.entity, RedirectResponseException(downloadParam.url))
+      handleResponseError(resp.entity, RedirectResponseException(downloadParams.url))
 
     // handle failures
-    case (Success(resp@HttpResponse(code, _, _, _)), downloadParam: DownloadUrlToFile) =>
-      log.error("{}: Request failed, response code: {}", downloadParam.url, code)
+    case (Success(resp@HttpResponse(code, _, _, _)), state@ImageProcessingState(downloadParams, _)) =>
+      log.error("{}: Request failed, response code: {}", downloadParams.url, code)
       resp.entity.withSizeLimit(1024 * 1024).dataBytes.take(1024 * 1024).runFold(ByteString(""))(_ ++ _).map { body =>
-        log.error("{}: failure body: {}", downloadParam.url, body.utf8String)
-        Failure(RequestFailedException(downloadParam.url, body.utf8String))
+        log.error("{}: failure body: {}", downloadParams.url, body.utf8String)
+        Failure(RequestFailedException(downloadParams.url, body.utf8String))
       } recover {
-        case _ => Failure(RequestFailedException(downloadParam.url, ""))
+        case _ => Failure(RequestFailedException(downloadParams.url, ""))
       }
 
-    case (Failure(exception), downloadParam: DownloadUrlToFile) =>
-      log.error("{}: Request failed: {}", downloadParam.url, exception)
+    case (Failure(exception), state@ImageProcessingState(downloadParams, _)) =>
+      log.error("{}: Request failed: {}", downloadParams.url, exception)
       Future.successful(Failure(exception))
   }
 
   private def handleResponseError(entity: ResponseEntity, exception: Throwable) = {
-    entity.withSizeLimit(MTU_BYTES).discardBytes().future().transform(_ => Success(Failure(exception)))
+    val MTU_BYTES: Long = 1500 // since we've got at least one packet already, we can discard some without blocking, and possibly re-use the connection.
+    // Sure there's the headers (~730 bytes from flickr.com) not being accounted for and transfer encoding, so this is just a hopefully-effective heuristic.
+    val REDIRECT_BYTES: Long = 3213 // the not available redirect includes this many bytes. With headers, this should limit to reading 3 packets.
+    entity.withSizeLimit(REDIRECT_BYTES).discardBytes().future().transform(_ => Success(Failure(exception)))
   }
 
-  private def downloadComplete(): (Try[(IOResult, DigestResult, DownloadUrlToFile)]) => Unit = {
-    case Success((IOResult(count, Success(_)), md5DigestResult: DigestResult, downloadParams: DownloadUrlToFile)) =>
+  private def processMd5Result: Try[(IOResult, DigestResult, ImageProcessingState)] => Try[ImageProcessingState] = {
+    case Success((IOResult(count, Success(_)), md5DigestResult: DigestResult, state@ImageProcessingState(downloadParams, _))) =>
       val decodedMd5: ByteString = decodeBase64Md5(downloadParams.expectedMd5)
 
       if (decodedMd5 != md5DigestResult.messageDigest) {
@@ -153,35 +173,56 @@ case class Director(implicit system: ActorSystem) {
         if (deleted) {
           log.info("Deleted {}", downloadParams.filePath)
         }
+        Failure(MD5SumMismatch(downloadParams))
+      } else {
+        log.info("Request data completely read for {}. {} bytes.", downloadParams.url, count)
+        Success(state)
       }
-      log.info("Request data completely read for {}. {} bytes.", downloadParams.url, count)
-    case Success((IOResult(_, Failure(error)), _, downloadParams: DownloadUrlToFile)) =>
+    case Success((IOResult(_, Failure(error)), _, state@ImageProcessingState(downloadParams, _))) =>
       log.error("{}: failed saving request data to file: {}", downloadParams.url, error)
       val deleted = Files.deleteIfExists(downloadParams.filePath)
       if (deleted) {
         log.info("Deleted {}", downloadParams.filePath)
       }
+      Failure(error)
     case Failure(exception) =>
       log.error("Download failure: {}", exception)
+      Failure(exception)
   }
+
+  def fileExistsAndHasGreaterThanZeroSize(filePath: Path): Boolean =
+    try {
+      Files.size(filePath) > 0
+    } catch {
+      case _: Throwable => false
+    }
 
   private def resizeImageAndSaveToFile(filePath: Path): Sink[ByteString, Future[Done]] = {
-    ImageResize.resizeJpgFlow(299).watchTermination()({
-      case (mat, eventualDone: Future[Done]) =>
-        eventualDone.onComplete({
-          case Failure(error) =>
-            log.error("Resize Failed: {}", error)
-            System.err.println("Resize Failed: " + error)
-          case Success(_) =>
-            log.info("done resizing")
+    if (fileExistsAndHasGreaterThanZeroSize(filePath)) {
+      Sink.ignore
+    } else {
+      ImageResize.resizeJpgFlow(299)
+        .watchTermination()({
+          case (mat, eventualDone: Future[Done]) =>
+            eventualDone.onComplete({
+              case Failure(error) =>
+                log.error("Resize Failed: {}", error)
+                System.err.println("Resize Failed: " + error)
+              case Success(_) =>
+                log.info("done resizing")
+            })
+            mat
         })
-        mat
-    })
-      .to(FileIO.toPath(resizedImagePath(filePath)))
+        .to(FileIO.toPath(filePath))
+    }
   }
 
-  private def saveToFileAndComputeMd5(filePath: Path): Sink[ByteString, Future[(IOResult, DigestResult)]] = {
-    broadcastToSinksSingleFuture(FileIO.toPath(filePath), md5Sink)
+  private def saveToFileIfNotPresentAndComputeMd5(filePath: Path, needToDownload: Boolean): Sink[ByteString, Future[(IOResult, DigestResult)]] = {
+    if (needToDownload) {
+      broadcastToSinksSingleFuture(FileIO.toPath(filePath), md5Sink)
+    } else {
+      md5Sink.mapMaterializedValue(_.map((IOResult(Files.size(filePath), Success(Done)), _)))
+    }
   }
 
   private def resizedImagePath(filePath: Path): Path = {
@@ -214,20 +255,23 @@ case class Director(implicit system: ActorSystem) {
 
   }
 
-  private def filterNeedToDownload(alwaysDownload: Boolean): Flow[(HttpRequest, DownloadUrlToFile), (HttpRequest, DownloadUrlToFile), NotUsed] =
-    Flow[(HttpRequest, DownloadUrlToFile)]
-      .mapAsyncUnordered(Runtime.getRuntime.availableProcessors() * 2)(needToDownloadRequest(alwaysDownload))
-      .filter(_._1)
-      .map(_._2)
+  private def filterNeedToDownload(alwaysDownload: Boolean): Flow[(HttpRequest, DownloadParams), (HttpRequest, ImageProcessingState), NotUsed] =
+    mapNeedToDownloadRequest(alwaysDownload)
+      .filter(_._2.needToDownload)
 
-  private def needToDownloadRequest(alwaysDownload: Boolean): ((HttpRequest, DownloadUrlToFile)) => Future[(Boolean, (HttpRequest, DownloadUrlToFile))] = {
-    case downloadRequestTuple@(downloadRequest: HttpRequest, downloadUrlToFile: DownloadUrlToFile) =>
-      for {
-        nd <- needToDownload(downloadUrlToFile, alwaysDownload)
-      } yield (nd, downloadRequestTuple)
+  private def mapNeedToDownloadRequest(alwaysDownload: Boolean): Flow[(HttpRequest, DownloadParams), (HttpRequest, ImageProcessingState), NotUsed] = {
+    Flow[(HttpRequest, DownloadParams)]
+      .mapAsyncUnordered(Runtime.getRuntime.availableProcessors() * 2)(needToDownloadRequest(alwaysDownload))
   }
 
-  private def makeDownloadRequestTuple(checkMd5IfExists: Boolean, line: Map[String, ByteString]): (HttpRequest, DownloadUrlToFile) = {
+  private def needToDownloadRequest(alwaysDownload: Boolean): ((HttpRequest, DownloadParams)) => Future[(HttpRequest, ImageProcessingState)] = {
+    case downloadRequestTuple@(downloadRequest: HttpRequest, downloadUrlToFile: DownloadParams) =>
+      for {
+        nd <- needToDownload(downloadUrlToFile, alwaysDownload)
+      } yield (downloadRequestTuple._1, ImageProcessingState(downloadRequestTuple._2, nd))
+  }
+
+  private def makeDownloadRequestTuple(checkMd5IfExists: Boolean, line: Map[String, ByteString]): (HttpRequest, DownloadParams) = {
     (makeRequest(line), makeDownloadUrlToFile(line, outputDir(line), checkMd5IfExists))
   }
 
@@ -314,17 +358,17 @@ case class Director(implicit system: ActorSystem) {
 
   def makeRequest(line: Map[String, ByteString]) = HttpRequest(uri = line("OriginalURL").utf8String)
 
-  def makeDownloadUrlToFile(line: Map[String, ByteString], outputDir: Path, checkMd5IfExists: Boolean): DownloadUrlToFile = {
+  def makeDownloadUrlToFile(line: Map[String, ByteString], outputDir: Path, checkMd5IfExists: Boolean): DownloadParams = {
     val originalURLStr: String = line("OriginalURL").utf8String
     val originalURL: Uri = Uri(originalURLStr)
     val destPath: Path = outputDir.resolve(originalURL.path.toString().split('/').last)
-    DownloadUrlToFile(originalURLStr, destPath, line("OriginalSize").utf8String.toLong,
+    DownloadParams(originalURLStr, destPath, line("OriginalSize").utf8String.toLong,
       line("OriginalMD5").utf8String, checkMd5IfExists)
   }
 
   def outputDir(line: Map[String, ByteString]): java.nio.file.Path = Paths.get("2017_07", line("Subset").utf8String, "images-original")
 
-  private def needToDownload(downloadUrlToFile: DownloadUrlToFile, alwaysDownload: Boolean): Future[Boolean] = {
+  private def needToDownload(downloadUrlToFile: DownloadParams, alwaysDownload: Boolean): Future[Boolean] = {
     if (alwaysDownload) {
       Future(true)
     } else {
@@ -364,3 +408,5 @@ case class ContentTypeNotJpegException(message: String) extends RuntimeException
 case class RedirectResponseException(url: String) extends RuntimeException(url)
 
 case class RequestFailedException(url: String, body: String) extends RuntimeException("http request to %s failed: %s".format(url, body))
+
+case class MD5SumMismatch(downloadParams: DownloadParams) extends RuntimeException

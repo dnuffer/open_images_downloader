@@ -23,6 +23,9 @@ object DigestCalculator {
   def flow(algorithm: Algorithm): Flow[ByteString, DigestResult, NotUsed] =
     apply(algorithm)
 
+  def asMat(algorithm: Algorithm): Flow[ByteString, ByteString, Future[DigestResult]] =
+    Flow[ByteString].alsoToMat(sink(algorithm))(Keep.right)
+
   /**
     * Returns the String encoded as Hex representation of the digested stream of [[akka.util.ByteString]]
     */
