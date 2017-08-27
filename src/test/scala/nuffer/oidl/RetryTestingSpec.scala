@@ -27,6 +27,7 @@ class RetryTestingSpec extends StreamSpec {
           case (Success(httpResponse), url) =>
             println(httpResponse)
             Await.result(httpResponse.discardEntityBytes().future(), Duration.Inf)
+          case _ => assert(false)
         })
 
       // hook up a looping flow that re-inserts failures into the stream to get retried.

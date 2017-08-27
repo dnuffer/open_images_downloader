@@ -1,7 +1,8 @@
 package nuffer.oidl
 
 import java.io.InputStream
-import java.nio.file.{Files, Path, Paths}
+import java.nio.charset.StandardCharsets
+import java.nio.file.{Files, Path, Paths, StandardOpenOption}
 
 import akka.actor.ActorSystem
 import akka.event.Logging
@@ -23,7 +24,7 @@ import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
 import scala.util.{Failure, Success, Try}
 
-case class DownloadParams(url: String, filePath: Path, expectedSize: Long, expectedMd5: String, checkMd5IfExists: Boolean)
+case class DownloadParams(url: String, filePath: Path, expectedSize: Long, expectedMd5: String, checkMd5IfExists: Boolean, csvLine: Map[String, ByteString])
 
 case class ImageProcessingState(downloadParams: DownloadParams, needToDownload: Boolean)
 
@@ -45,20 +46,68 @@ case class Director(implicit system: ActorSystem) {
 
     tarArchiveEntrySource
       .via(alsoToEagerCancelGraph(createDirsForEntrySink)) // don't use .alsoTo(), use Broadcast( , eagerCancel=true) to avoid consuming the entire input stream when downstream cancels.
+      .alsoTo(Sink.foreach(createResultsCsv))
       .flatMapConcat(tarArchiveEntryToCsvLines)
-      .take(200) // for testing purposes, limit to 100
+      .take(100) // for testing purposes, limit to 100
       .alsoTo(countAndPrintNumberOfLinesPerType)
       .map(makeDownloadRequestTuple(checkMd5IfExists, _))
       .via(mapNeedToDownloadRequest(alwaysDownload))
       .via(startDownloadOrFromFile)
-      .filter(keepSuccess)
       .mapAsyncUnordered(100 /* TODO: make this the same size as the number of http streams */)(processJpegBytes)
       .via(Flow.fromFunction(processMd5Result))
+      .alsoTo(Sink.foreach(writeResultToCsv))
       .watchTermination()(makeTerminationHandler)
-      .runWith(Sink.foreach(println))
+      .runWith(Sink.ignore)
+    //      .runWith(Sink.foreach(println))
   }
 
-  private def startDownloadOrFromFile = {
+  val csvFilenameKey: String = "_csv_filename"
+
+  val imagesSuccessCsvFilename = "images-success.csv"
+  val imagesFailureCsvFilename = "images-failure.csv"
+
+  private def quoteAuthorAndTitle(line: String, columnName: String): String = {
+    if (columnName == "Author" || columnName == "Title")
+      quote(line)
+    else
+      line
+  }
+
+  private def quote(line: String) = {
+    '"' + line.replace("\"", "\"\"") + '"'
+  }
+
+  private def writeResultToCsv: Try[ImageProcessingState] => Unit = {
+    case Success(state) =>
+      Files.write(Paths.get(state.downloadParams.csvLine(csvFilenameKey).utf8String).resolveSibling(imagesSuccessCsvFilename),
+        csvHeaderArray.map(columnName => quoteAuthorAndTitle(state.downloadParams.csvLine(columnName).utf8String, columnName)).mkString("", ",", "\n").getBytes(StandardCharsets.UTF_8),
+        StandardOpenOption.APPEND, StandardOpenOption.WRITE)
+    case Failure(exception: ImageProcessingException) =>
+      val csvLine = exception.state.downloadParams.csvLine.updated("FailureDetails", ByteString(quote(exception.getMessage)))
+      Files.write(Paths.get(csvLine(csvFilenameKey).utf8String).resolveSibling(imagesFailureCsvFilename),
+        failureCsvHeaderArray.map(columnName => quoteAuthorAndTitle(csvLine(columnName).utf8String, columnName)).mkString("", ",", "\n").getBytes(StandardCharsets.UTF_8),
+        StandardOpenOption.APPEND, StandardOpenOption.WRITE)
+    case Failure(exception: Throwable) =>
+      log.error("writeResultToCsv got an unhandled exception: {}", exception)
+  }
+
+  val csvHeader: String = "ImageID,Subset,OriginalURL,OriginalLandingURL,License,AuthorProfileURL,Author,Title,OriginalSize,OriginalMD5,Thumbnail300KURL\n"
+  val csvHeaderArray: Array[String] = csvHeader.substring(0, csvHeader.length - 1).split(',')
+
+  val failureCsvHeader: String = csvHeader.substring(0, csvHeader.length - 1) + ",FailureDetails\n"
+  val failureCsvHeaderArray: Array[String] = failureCsvHeader.substring(0, failureCsvHeader.length - 1).split(',')
+
+  private def createResultsCsv: ((TarArchiveInputStream, TarArchiveEntry)) => Unit = {
+
+    case (tarArchiveInputStream: TarArchiveInputStream, tarArchiveEntry: TarArchiveEntry) =>
+      val entryPath = Paths.get(tarArchiveEntry.getName)
+      val successPath = entryPath.resolveSibling(imagesSuccessCsvFilename)
+      Files.write(successPath, csvHeader.getBytes(StandardCharsets.UTF_8))
+      val failurePath = entryPath.resolveSibling(imagesFailureCsvFilename)
+      Files.write(failurePath, failureCsvHeader.getBytes(StandardCharsets.UTF_8))
+  }
+
+  private def startDownloadOrFromFile: Graph[FlowShape[(HttpRequest, ImageProcessingState), Try[(Source[ByteString, Any], ImageProcessingState)]], NotUsed] = {
     IfThenElse.flow(
       {
         case (request: HttpRequest, state: ImageProcessingState) => state.needToDownload
@@ -84,16 +133,19 @@ case class Director(implicit system: ActorSystem) {
       // need to wait for the resize and save file to finish, so create a joined future
       val joinedFuture = for {v1 <- tupleOfFutures._1; v2 <- tupleOfFutures._2} yield (v1, v2)
 
-      // convert it to a Try and include downloadParams.
+      // convert it to a Try and include state.
       joinedFuture
         .map({
           case (done, (ioResult, digestResult)) => Success((ioResult, digestResult, state))
         })
         .recover({
-          case exception => Failure(exception)
+          case exception => Failure(ImageUnknownException(state, exception))
         })
+    case Failure(exception: ImageProcessingException) =>
+      Future.successful(Failure(exception))
     case Failure(exception) =>
-      Future.failed(exception)
+      log.error("processJpegBytes unknown exception: {}", exception)
+      Future.successful(Failure(exception))
   }
 
   private def keepSuccess[T]: (Try[T]) => Boolean = {
@@ -104,7 +156,7 @@ case class Director(implicit system: ActorSystem) {
   private def processHttpResponse: ((Try[HttpResponse], ImageProcessingState)) => Future[Try[(Source[ByteString, Any], ImageProcessingState)]] = {
 
     // server replied with a 200 OK
-    case (Success(HttpResponse(StatusCodes.OK, _, entity1, _)), state@ImageProcessingState(downloadParams@DownloadParams(url: String, _: Path, expectedSize: Long, _: String, _: Boolean), _)) =>
+    case (Success(HttpResponse(StatusCodes.OK, _, entity1, _)), state@ImageProcessingState(downloadParams@DownloadParams(url: String, _, expectedSize: Long, _, _, _), _)) =>
       log.info("{} OK. Content-Type: {}", url, entity1.contentType)
       val entity = entity1.withSizeLimit(expectedSize)
       entity.contentType match {
@@ -115,15 +167,15 @@ case class Director(implicit system: ActorSystem) {
                 Future(Success(entity.dataBytes, state))
               } else {
                 log.error("{}: server size ({}) doesn't match expected size ({})!", url, serverSize, expectedSize)
-                handleResponseError(entity, InvalidSizeException(url, serverSize, expectedSize))
+                handleResponseError(entity, InvalidSizeException(url, serverSize, expectedSize, state))
               }
             case None =>
               log.error("{}: No Content-Length!", url)
-              handleResponseError(entity, NoContentLengthHeaderException(url))
+              handleResponseError(entity, NoContentLengthHeaderException(url, state))
           }
         case _ =>
           log.error("{}: Content-Type != image/jpeg", url)
-          handleResponseError(entity, ContentTypeNotJpegException(url))
+          handleResponseError(entity, ContentTypeNotJpegException(url, state))
       }
 
 
@@ -138,16 +190,16 @@ case class Director(implicit system: ActorSystem) {
         case None =>
           log.error("{}: Got redirect without Location header", downloadParams.url)
       }
-      handleResponseError(resp.entity, RedirectResponseException(downloadParams.url))
+      handleResponseError(resp.entity, RedirectResponseException(String.format("photo is unavailable: %s", downloadParams.url), state))
 
     // handle failures
     case (Success(resp@HttpResponse(code, _, _, _)), state@ImageProcessingState(downloadParams, _)) =>
       log.error("{}: Request failed, response code: {}", downloadParams.url, code)
       resp.entity.withSizeLimit(1024 * 1024).dataBytes.take(1024 * 1024).runFold(ByteString(""))(_ ++ _).map { body =>
         log.error("{}: failure body: {}", downloadParams.url, body.utf8String)
-        Failure(RequestFailedException(downloadParams.url, body.utf8String))
+        Failure(RequestFailedException(downloadParams.url, body.utf8String, state))
       } recover {
-        case _ => Failure(RequestFailedException(downloadParams.url, ""))
+        case _ => Failure(RequestFailedException(downloadParams.url, "", state))
       }
 
     case (Failure(exception), state@ImageProcessingState(downloadParams, _)) =>
@@ -173,7 +225,7 @@ case class Director(implicit system: ActorSystem) {
         if (deleted) {
           log.info("Deleted {}", downloadParams.filePath)
         }
-        Failure(MD5SumMismatch(downloadParams))
+        Failure(MD5SumMismatch(state))
       } else {
         log.info("Request data completely read for {}. {} bytes.", downloadParams.url, count)
         Success(state)
@@ -184,9 +236,11 @@ case class Director(implicit system: ActorSystem) {
       if (deleted) {
         log.info("Deleted {}", downloadParams.filePath)
       }
-      Failure(error)
+      Failure(ImageIOException(state, error))
+    case Failure(exception: ImageProcessingException) =>
+      Failure(exception)
     case Failure(exception) =>
-      log.error("Download failure: {}", exception)
+      log.error("Download failure unknown exception: {}", exception)
       Failure(exception)
   }
 
@@ -201,6 +255,7 @@ case class Director(implicit system: ActorSystem) {
     if (fileExistsAndHasGreaterThanZeroSize(filePath)) {
       Sink.ignore
     } else {
+      Files.createDirectories(filePath.getParent) // theoretically this should be done during materialization, but somehow that's a race condition with FileIO.toPath() and so causes random failures.
       ImageResize.resizeJpgFlow(299)
         .watchTermination()({
           case (mat, eventualDone: Future[Done]) =>
@@ -219,6 +274,7 @@ case class Director(implicit system: ActorSystem) {
 
   private def saveToFileIfNotPresentAndComputeMd5(filePath: Path, needToDownload: Boolean): Sink[ByteString, Future[(IOResult, DigestResult)]] = {
     if (needToDownload) {
+      Files.createDirectories(filePath.getParent) // theoretically this should be done during materialization, but somehow that's a race condition with FileIO.toPath() and so causes random failures.
       broadcastToSinksSingleFuture(FileIO.toPath(filePath), md5Sink)
     } else {
       md5Sink.mapMaterializedValue(_.map((IOResult(Files.size(filePath), Success(Done)), _)))
@@ -226,7 +282,7 @@ case class Director(implicit system: ActorSystem) {
   }
 
   private def resizedImagePath(filePath: Path): Path = {
-    filePath.getParent.resolveSibling("images-resized").resolve(filePath.getFileName)
+    filePath.getParent.getParent.resolveSibling("images-resized").resolve(filePath.getParent.getFileName).resolve(filePath.getFileName)
   }
 
   private def md5Sink: Sink[ByteString, Future[DigestResult]] = {
@@ -290,6 +346,7 @@ case class Director(implicit system: ActorSystem) {
         .via(cacheFileForTarEntry(tarEntry))
         .via(CsvParsing.lineScanner(CsvParsing.Comma, CsvParsing.DoubleQuote, '\0'))
         .via(CsvToMap.toMap())
+        .map(line => line.updated(csvFilenameKey, ByteString(tarEntry.getName)))
   }
 
   private def createDirsForEntrySink: Sink[(TarArchiveInputStream, TarArchiveEntry), Future[Done]] = {
@@ -361,9 +418,11 @@ case class Director(implicit system: ActorSystem) {
   def makeDownloadUrlToFile(line: Map[String, ByteString], outputDir: Path, checkMd5IfExists: Boolean): DownloadParams = {
     val originalURLStr: String = line("OriginalURL").utf8String
     val originalURL: Uri = Uri(originalURLStr)
-    val destPath: Path = outputDir.resolve(originalURL.path.toString().split('/').last)
+    val fileName = originalURL.path.toString().split('/').last
+    val fileDirName = fileName.substring(0, 3) // the first 3 chars will create 1000 dirs with 9000 files in each. That's pretty balanced.
+    val destPath: Path = outputDir.resolve(fileDirName).resolve(fileName)
     DownloadParams(originalURLStr, destPath, line("OriginalSize").utf8String.toLong,
-      line("OriginalMD5").utf8String, checkMd5IfExists)
+      line("OriginalMD5").utf8String, checkMd5IfExists, line)
   }
 
   def outputDir(line: Map[String, ByteString]): java.nio.file.Path = Paths.get("2017_07", line("Subset").utf8String, "images-original")
@@ -398,15 +457,24 @@ case class Director(implicit system: ActorSystem) {
 
 }
 
-case class InvalidSizeException(url: String, serverSize: Long, expectedSize: Long) extends
-  RuntimeException("%s: server size (%d) doesn't match expected size (%d)!".format(url, serverSize, expectedSize))
+sealed trait ImageProcessingException {
+  def state: ImageProcessingState
+}
 
-case class NoContentLengthHeaderException(message: String) extends RuntimeException(message)
+case class InvalidSizeException(url: String, serverSize: Long, expectedSize: Long, state: ImageProcessingState) extends
+  RuntimeException("%s: server size (%d) doesn't match expected size (%d)!".format(url, serverSize, expectedSize)) with
+  ImageProcessingException
 
-case class ContentTypeNotJpegException(message: String) extends RuntimeException(message)
+case class NoContentLengthHeaderException(message: String, state: ImageProcessingState) extends RuntimeException(message) with ImageProcessingException
 
-case class RedirectResponseException(url: String) extends RuntimeException(url)
+case class ContentTypeNotJpegException(message: String, state: ImageProcessingState) extends RuntimeException(message) with ImageProcessingException
 
-case class RequestFailedException(url: String, body: String) extends RuntimeException("http request to %s failed: %s".format(url, body))
+case class RedirectResponseException(message: String, state: ImageProcessingState) extends RuntimeException(message) with ImageProcessingException
 
-case class MD5SumMismatch(downloadParams: DownloadParams) extends RuntimeException
+case class RequestFailedException(url: String, body: String, state: ImageProcessingState) extends RuntimeException("http request to %s failed: %s".format(url, body)) with ImageProcessingException
+
+case class MD5SumMismatch(state: ImageProcessingState) extends RuntimeException("md5 sum mismatch") with ImageProcessingException
+
+case class ImageIOException(state: ImageProcessingState, cause: Throwable) extends RuntimeException(cause) with ImageProcessingException
+
+case class ImageUnknownException(state: ImageProcessingState, cause: Throwable) extends RuntimeException(cause) with ImageProcessingException
