@@ -499,12 +499,7 @@ case class Director(implicit system: ActorSystem) {
     Sink.foreach[(TarArchiveInputStream, TarArchiveEntry)]({
       case (tarArchiveInputStream, tarEntry) =>
         log.info("tarEntry.name: {}", tarEntry.getName)
-        val parentDir = Paths.get(tarEntry.getName).getParent
-        parentDir.toFile.mkdirs()
-        val imagesOriginalDir = parentDir.resolve("images-original")
-        imagesOriginalDir.toFile.mkdirs()
-        val imagesResizedDir = parentDir.resolve("images-resized")
-        imagesResizedDir.toFile.mkdirs()
+        Paths.get(tarEntry.getName).getParent.toFile.mkdirs()
     })
   }
 
