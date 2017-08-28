@@ -19,9 +19,11 @@ import akka.{Done, NotUsed}
 import nuffer.oidl.Utils.{broadcastToSinksSingleFuture, decodeBase64Md5, dehexify, hexify}
 import org.apache.commons.compress.archivers.tar.{TarArchiveEntry, TarArchiveInputStream}
 
+import scala.concurrent.duration._
 import scala.annotation.unchecked.uncheckedVariance
-import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.Future
+import scala.concurrent.ExecutionContext
+//import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.{Await, Future}
 import scala.util.{Failure, Success, Try}
 
 case class DownloadParams(url: String, filePath: Path, expectedSize: Long, expectedMd5: String, checkMd5IfExists: Boolean, csvLine: Map[String, ByteString])
@@ -127,18 +129,32 @@ case class Director(implicit system: ActorSystem) {
   final implicit val materializer: ActorMaterializer = ActorMaterializer()
 
   def run(): Future[Done] = {
+    val otherFilesFuture: Future[Done] = Future.sequence(
+      DatasetMetadata.openImagesV2DatasetMetadata.otherFiles.take(1)
+        .map(downloadAndExtractMetadataFile)
+    ).map(_ => Done)
+
+    val imagesFuture: Future[Done] = startDownloadingImages
+
+    for {
+      otherFiles <- otherFilesFuture
+      images <- imagesFuture
+    } yield Done
+  }
+
+  private def startDownloadingImages = {
     val checkMd5IfExists = false
     val alwaysDownload = false
 
-    val tarSource: Source[ByteString, NotUsed] = images_2017_07_tar_gz_source
+    val tarSource: Source[ByteString, NotUsed] = metadataFileSource(DatasetMetadata.openImagesV2DatasetMetadata.imagesFile)
       .withAttributes(ActorAttributes.supervisionStrategy(_ => Supervision.Stop))
-      .via(images_2017_07_tar_gz_cache_flow)
+      .via(metadataFileCacheFlow(DatasetMetadata.openImagesV2DatasetMetadata.imagesFile.tarGzFile))
       .via(Compression.gunzip())
-      .via(images_2017_07_tar_cache_flow)
+      .via(metadataFileCacheFlow(DatasetMetadata.openImagesV2DatasetMetadata.imagesFile.tarFile))
 
     val tarArchiveEntrySource: Source[(TarArchiveInputStream, TarArchiveEntry), NotUsed] = tarArchiveEntriesFromTarFile(tarSource)
 
-    tarArchiveEntrySource
+    val imagesFuture: Future[Done] = tarArchiveEntrySource
       .via(alsoToEagerCancelGraph(createDirsForEntrySink)) // don't use .alsoTo(), use Broadcast( , eagerCancel=true) to avoid consuming the entire input stream when downstream cancels.
       .alsoTo(Sink.foreach(createResultsCsv))
       .flatMapConcat(tarArchiveEntryToCsvLines)
@@ -153,6 +169,42 @@ case class Director(implicit system: ActorSystem) {
       .watchTermination()(makeTerminationHandler)
       .runWith(Sink.ignore)
     //      .runWith(Sink.foreach(println))
+    imagesFuture
+  }
+
+  private def downloadAndExtractMetadataFile: (MetadataFile) => Future[Done] = {
+    metadataFile => {
+      val annotationsSource: Source[ByteString, NotUsed] = metadataFileSource(metadataFile)
+        .withAttributes(ActorAttributes.supervisionStrategy(_ => Supervision.stop))
+        .via(metadataFileCacheFlow(metadataFile.tarGzFile))
+        .via(Compression.gunzip())
+        .via(metadataFileCacheFlow(metadataFile.tarFile))
+
+      val annotationsTarArchiveEntrySource: Source[(TarArchiveInputStream, TarArchiveEntry), NotUsed] = tarArchiveEntriesFromTarFile(annotationsSource)
+
+      annotationsTarArchiveEntrySource
+        .via(alsoToEagerCancelGraph(createDirsForEntrySink))
+        .runForeach({
+          case ((tarArchiveInputStream: TarArchiveInputStream, tarArchiveEntry: TarArchiveEntry)) =>
+            Await.result(StreamConverters.fromInputStream(() => TarEntryInputStream(tarArchiveInputStream))
+              .runWith(FileIO.toPath(Paths.get(tarArchiveEntry.getName))),
+              Duration.Inf)
+
+        })
+      //        // This is async so the waiting can be handled by the framework.
+      //        // Need to limit to parallelism 1 because the TarArchiveInputStream can only by read
+      //        // once and has to be processed in sequence.
+      //        .mapAsync(1)(
+      //        {
+      //          case ((tarArchiveInputStream, tarArchiveEntry)) =>
+      //            StreamConverters.fromInputStream(() => TarEntryInputStream(tarArchiveInputStream))
+      //              .runWith(FileIO.toPath(Paths.get(tarArchiveEntry.getName)))
+      ////              .via(cacheFileForTarEntry(tarArchiveEntry))
+      ////              .toMat(Sink.ignore)(Keep.left)
+      ////              .run()
+      //        })
+      //        .runWith(Sink.ignore)
+    }
   }
 
   val csvFilenameKey: String = "_csv_filename"
@@ -486,25 +538,21 @@ case class Director(implicit system: ActorSystem) {
     }
   }
 
-  private def images_2017_07_tar_cache_flow = {
-    CacheFile.flow(filename = Paths.get("images_2017_07.tar"),
-      expectedSize = 3362037760L,
-      expectedMd5 = Some(dehexify("bff4cdd922f018f343e53e2ffea909f2")),
+  private def metadataFileSource(metadataFile: MetadataFile): Source[ByteString, NotUsed] = {
+    httpGetDataSource(metadataFile.uri, metadataFile.tarGzFile.size)
+  }
+
+  private def metadataFileCacheFlow(metadataFileDetails: MetadataFileDetails): Graph[FlowShape[ByteString, ByteString], NotUsed] = {
+    CacheFile.flow(filename = Paths.get(metadataFileDetails.name),
+      expectedSize = metadataFileDetails.size,
+      expectedMd5 = Some(dehexify(metadataFileDetails.md5sum)),
       saveFile = true,
       useSelfDeletingTempFile = true)
   }
 
-  private def images_2017_07_tar_gz_cache_flow = {
-    CacheFile.flow(filename = Paths.get("images_2017_07.tar.gz"),
-      expectedSize = 1038132176L,
-      expectedMd5 = Some(dehexify("9c7d7d1b9c19f72c77ac0fa8e2695e00")),
-      saveFile = true,
-      useSelfDeletingTempFile = true)
-  }
-
-  private def images_2017_07_tar_gz_source = {
-    Source.fromFuture(Http().singleRequest(HttpRequest(uri = "https://storage.googleapis.com/openimages/2017_07/images_2017_07.tar.gz")))
-      .flatMapConcat(httpResponse => httpResponse.entity.withSizeLimit(1038132176).dataBytes)
+  private def httpGetDataSource(uri: String, fileSize: Long): Source[ByteString, NotUsed] = {
+    Source.fromFuture(Http().singleRequest(HttpRequest(uri = uri)))
+      .flatMapConcat(httpResponse => httpResponse.entity.withSizeLimit(fileSize).dataBytes)
   }
 
   def makeRequest(line: Map[String, ByteString]) = HttpRequest(uri = line("OriginalURL").utf8String)
