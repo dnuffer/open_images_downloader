@@ -1,7 +1,6 @@
 # Open Images dataset downloader
 
 TODO:
-* put images into filename-prefix-subdirs to avoid 9Mil files in 1 dir. Splitting on the first 3 chars might do the job. With 1 level of dirs, it's possible to create a balance with sqrt(9000000) = 3000 entries in each. Could use either the ImageId from the images.csv file (hex digits) or the beginning of the flickr filname (decimal digits). The flickr filename is the downloaded filename as well, so use that.
 * optionally save original file and/or extract:
     * Bounding box annotations (train, validation, and test sets)
     * Image-level annotations (train, validation, and test sets)
