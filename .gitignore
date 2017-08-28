@@ -52,7 +52,7 @@ fabric.properties
 /.idea/
 /1000-test-images
 /2017_07
-/images_2017_07.tar*
+/*.tar*
 /test100images.csv
 /testfile
 /target
