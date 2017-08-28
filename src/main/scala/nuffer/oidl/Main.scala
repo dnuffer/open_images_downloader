@@ -8,6 +8,7 @@ import com.typesafe.config.{ConfigFactory, ConfigValueFactory}
 import org.rogach.scallop.{ScallopConf, ScallopOption}
 
 object Main extends App {
+
   class Conf(arguments: Seq[String]) extends ScallopConf(arguments) {
     val rootDir: ScallopOption[String] = opt[String](descr = "top-level directory for storing the Open Images dataset")
     val imagesCsv: ScallopOption[String] = opt[String](descr = "If this option is specified, only download and process the images in the indicated file.")
@@ -24,10 +25,15 @@ object Main extends App {
   val conf = new Conf(args)
 
   val mainConfig = ConfigFactory.load()
-      .withValue("akka.http.host-connection-pool.max-retries", ConfigValueFactory.fromAnyRef(conf.maxRetries()))
-//    .withValue("akka.http.host-connection-pool.max-connections", ConfigValueFactory.fromAnyRef(1))
-//    .withValue("akka.http.host-connection-pool.idle-timeout", ConfigValueFactory.fromAnyRef("1 s"))
-//    .withValue("akka.http.host-connection-pool.client.idle-timeout", ConfigValueFactory.fromAnyRef("1ms"))
+    .withValue("akka.http.host-connection-pool.max-retries", ConfigValueFactory.fromAnyRef(conf.maxRetries()))
+    .withValue("akka.http.host-connection-pool.idle-timeout", ConfigValueFactory.fromAnyRef("infinite"))
+    .withValue("akka.http.client.idle-timeout", ConfigValueFactory.fromAnyRef("infinite"))
+    .withValue("akka.http.host-connection-pool.client.idle-timeout", ConfigValueFactory.fromAnyRef("infinite"))
+    .withValue("akka.stream.default-blocking-io-dispatcher.thread-pool-executor.fixed-pool-size", ConfigValueFactory.fromAnyRef("128"))
+    .withValue("akka.actor.default-dispatcher.fork-join-executor.parallelism-factor", ConfigValueFactory.fromAnyRef("4.0"))
+  //    .withValue("akka.http.host-connection-pool.max-connections", ConfigValueFactory.fromAnyRef(1))
+  //    .withValue("akka.http.host-connection-pool.idle-timeout", ConfigValueFactory.fromAnyRef("1 s"))
+  //    .withValue("akka.http.host-connection-pool.client.idle-timeout", ConfigValueFactory.fromAnyRef("1ms"))
   implicit val system = ActorSystem("oidl", mainConfig)
   implicit val materializer = ActorMaterializer()
   implicit val executionContext = system.dispatcher
@@ -38,8 +44,8 @@ object Main extends App {
   director.run().onComplete({
     _ =>
       Http().shutdownAllConnectionPools().onComplete({ _ =>
-//        log.info("sleeping")
-//        Thread.sleep(10000)
+        //        log.info("sleeping")
+        //        Thread.sleep(10000)
         log.info("context.system.terminate()")
         system.terminate()
       })
