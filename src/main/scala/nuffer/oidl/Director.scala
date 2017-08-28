@@ -512,7 +512,7 @@ case class Director(implicit system: ActorSystem) {
 
   private def tarArchiveEntriesFromTarFile(tarSource: Source[ByteString, NotUsed]): Source[(TarArchiveInputStream, TarArchiveEntry), NotUsed] = {
     tarSource
-      .toMat(StreamConverters.asInputStream())(Keep.right)
+      .toMat(StreamConverters.asInputStream(readTimeout = Long.MaxValue.nanoseconds))(Keep.right)
       .mapMaterializedValue(sourceFromTarInputStream)
       .run()
   }
