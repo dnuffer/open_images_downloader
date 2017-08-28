@@ -19,9 +19,9 @@ import akka.{Done, NotUsed}
 import nuffer.oidl.Utils.{broadcastToSinksSingleFuture, decodeBase64Md5, dehexify, hexify}
 import org.apache.commons.compress.archivers.tar.{TarArchiveEntry, TarArchiveInputStream}
 
-import scala.concurrent.duration._
 import scala.annotation.unchecked.uncheckedVariance
 import scala.concurrent.ExecutionContext
+import scala.concurrent.duration._
 //import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.{Await, Future}
 import scala.util.{Failure, Success, Try}
@@ -131,7 +131,7 @@ case class Director(implicit system: ActorSystem) {
 
   def run(): Future[Done] = {
     val otherFilesFuture: Future[Done] = Future.sequence(
-      DatasetMetadata.openImagesV2DatasetMetadata.otherFiles.take(1)
+      DatasetMetadata.openImagesV2DatasetMetadata.otherFiles
         .map(downloadAndExtractMetadataFile)
     ).map(_ => Done)
 
@@ -157,7 +157,7 @@ case class Director(implicit system: ActorSystem) {
 
     val imagesFuture: Future[Done] = tarArchiveEntrySource
       .via(alsoToEagerCancelGraph(createDirsForEntrySink)) // don't use .alsoTo(), use Broadcast( , eagerCancel=true) to avoid consuming the entire input stream when downstream cancels.
-      .alsoTo(Sink.foreach(createResultsCsv))
+      .via(alsoToEagerCancelGraph(Sink.foreach(createResultsCsv)))
       .flatMapConcat(tarArchiveEntryToCsvLines)
       .take(100) // for testing purposes, limit to 100
       .alsoTo(countAndPrintNumberOfLinesPerType)
