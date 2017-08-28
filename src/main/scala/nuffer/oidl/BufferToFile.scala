@@ -19,6 +19,9 @@ final case class BufferToFile(filename: Path, chunkSize: Int = 8192, deleteFileO
     val readByteBuffer = ByteBuffer.allocate(chunkSize)
 
     override def preStart(): Unit = {
+      if (filename.getParent != null) {
+        Files.createDirectories(filename.getParent)
+      }
       fileOutputChan = FileChannel.open(filename, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)
 
       // the DELETE_ON_CLOSE flag unlinks the file (on Linux) so this open has to happen second otherwise fileOutputChan will use a
