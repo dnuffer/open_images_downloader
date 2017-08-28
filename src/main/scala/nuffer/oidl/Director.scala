@@ -126,6 +126,7 @@ object DatasetMetadata {
 
 case class Director(implicit system: ActorSystem) {
   val log = Logging(system, this.getClass)
+  final implicit val ec: ExecutionContext = ExecutionContext.fromExecutorService(java.util.concurrent.Executors.newCachedThreadPool())
   final implicit val materializer: ActorMaterializer = ActorMaterializer()
 
   def run(): Future[Done] = {
