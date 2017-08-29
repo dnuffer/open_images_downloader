@@ -1,5 +1,6 @@
 package nuffer.oidl
 
+import java.nio.file.{Files, Path}
 import java.util.Base64
 
 import akka.stream.SinkShape
@@ -7,6 +8,7 @@ import akka.stream.scaladsl.{Broadcast, GraphDSL, Sink}
 import akka.util.ByteString
 
 import scala.concurrent.{ExecutionContext, Future}
+import scala.util.{Success, Try}
 
 object Utils {
   def decodeBase64Md5(expectedMd5: String): ByteString = {
@@ -45,5 +47,11 @@ object Utils {
           SinkShape(streamFan.in)
         }
     })
+  }
+
+  def fileSizeMatchesExpected(path: Path, expectedSize: Long): Boolean = Try(Files.size(path)) match {
+    case Success(size) =>
+      size == expectedSize
+    case _ => false
   }
 }

@@ -4,12 +4,12 @@ import java.nio.file.{Files, Path}
 
 import akka.NotUsed
 import akka.actor.ActorSystem
+import akka.event.Logging
 import akka.stream.scaladsl.{FileIO, Flow, Sink}
 import akka.stream.{ActorMaterializer, FlowShape, Graph}
 import akka.util.ByteString
 
 import scala.concurrent.{ExecutionContext, Future}
-import scala.util.{Success, Try}
 
 object CacheFile {
   def flow(filename: Path,
@@ -18,6 +18,7 @@ object CacheFile {
            saveFile: Boolean = true,
            useSelfDeletingTempFile: Boolean = true,
            chunkSize: Int = 8192)(implicit system: ActorSystem, ec: ExecutionContext): Graph[FlowShape[ByteString, ByteString], NotUsed] = {
+    val log = Logging(system, this.getClass)
     // use cases:
     //   * file exists, expectedMd5==None - use it for input
     //   * file exists, expectedMd5==Some - start async computing md5 of file, use it for input after md5 computed, before that time use input.
@@ -28,17 +29,9 @@ object CacheFile {
     // how to asynchronously check the md5? maybe start calculating the md5 in a future and until it finishes, simply read the input.
     // then once the md5 verification is done, switch to reading from the file. Call Future.isCompleted in onPush()/onPull() to see.
 
-    val fileSizeMatchesExpected = Try(Files.size(filename)) match {
-      case Success(size) =>
-        if (size == expectedSize) {
-          true
-        } else {
-          false
-        }
-      case _ => false
-    }
+    val fileSizeMatchesExpected = Utils.fileSizeMatchesExpected(filename, expectedSize)
 
-    printf("CacheFile.flow filename: %s, fileSizeMatchesExpected: %s\n", filename , fileSizeMatchesExpected)
+    log.info("CacheFile.flow filename: {}, fileSizeMatchesExpected: {}", filename, fileSizeMatchesExpected)
     //    val canImmediatelyUseFileForInput: Boolean = expectedMd5.isEmpty && fileSizeMatchesExpected
     val canImmediatelyUseFileForInput: Boolean = fileSizeMatchesExpected
 

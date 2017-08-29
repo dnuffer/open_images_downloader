@@ -1,20 +1,22 @@
 # Open Images dataset downloader
 
 TODO:
-* optionally save original file and/or extract:
-    * Bounding box annotations (train, validation, and test sets)
-    * Image-level annotations (train, validation, and test sets)
-    * Machine-populated image-level annotations (train, validation, and test sets)
-    * Classes and class descriptions
-* output progress to console
-* option to resize
-    * output format
-    * min/max side
-    * crop to fixed aspect ratio
-    * output quality/compression level
-* optionally download 300k urls. Thumbnail300KURL field. Missing for a number of rows, use the original url in that case.
-* option to save or discard original image
 * option to save logs to a file
+* output progress messages to console
+* optionally download 300k urls. Thumbnail300KURL field. Missing for a number of rows, use the original url in that case.
+* create command line options to control behavior:
+    * download & extract metadata files
+    * save .tar.gz files
+    * save .tar files
+    * save .tar contents
+    * option to resize
+        * output format
+        * min/max side
+        * crop to fixed aspect ratio
+        * output quality/compression level
+    * save or discard original image
+    * download 300k urls.
+    * output dir(s)
 * Use sbt-native-packager to create release files https://github.com/sbt/sbt-native-packager
 
 * ncurses based progress UI
