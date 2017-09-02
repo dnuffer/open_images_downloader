@@ -22,8 +22,7 @@ final case class LevelByteStringsSize(chunkSize: Int = 8192) extends SimpleLinea
     }
 
     override def onPush(): Unit = {
-      val elem = grab(in)
-      buffer ++= elem
+      buffer ++= grab(in)
       // If out is available, then it has been pulled but no dequeued element has been delivered.
       // Push the current element to out, then pull.
       if (isAvailable(out) && buffer.length >= chunkSize) {
