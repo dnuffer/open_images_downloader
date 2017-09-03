@@ -12,6 +12,7 @@ import scala.concurrent._
 import scala.concurrent.duration._
 import scala.language.postfixOps
 import scala.sys.process.BasicIO.BufferSize
+import scala.util.control.NonFatal
 import scala.util.{Failure, Success}
 
 object ProcessPipe {
@@ -33,7 +34,7 @@ object ProcessPipe {
             } else
               Success(Some(ByteString(buffer.take(bytesRead))))
           } catch {
-            case exception: Throwable => Failure(exception)
+            case NonFatal(exception) => Failure(exception)
           }
         }
       }(ec)
@@ -79,7 +80,7 @@ object ProcessPipe {
             }
             Await.result(pull(), Duration.Inf)
           } catch {
-            case exception: Throwable =>
+            case NonFatal(exception) =>
               proc.getOutputStream.close()
               stdoutQueue.fail(exception)
               proc.destroyForcibly()
