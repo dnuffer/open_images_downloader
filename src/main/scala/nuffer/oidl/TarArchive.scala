@@ -10,39 +10,44 @@ import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 case class TarFileCorruptedException() extends RuntimeException("checksum of header record is invalid")
 
 /**
-  * This is used to indicate the first record output from the flow for each tar archive entry, which will trigger a new SubFlow for each
+  * This is used to indicate the first/last record output from the flow for each tar archive entry, which will trigger a new SubFlow for each
   * new file in the tar archive.
   */
-case class TarArchiveEntryFirstRecord()
+case class TarArchiveEntryRecordOrder(first: Boolean, last: Boolean)
 
 
 object TarArchive {
   def subflowPerEntry(cancelStrategy: SubstreamCancelStrategy = SubstreamCancelStrategy.propagate) =
     flow()
       .splitWhen(cancelStrategy)({
-        case (_, _, Some(_: TarArchiveEntryFirstRecord)) => true
+        case (_, _, TarArchiveEntryRecordOrder(true, _)) => true
         case _ => false
       })
       .map(tuple => (tuple._1, tuple._2))
 
-  def flow(): Flow[ByteString, (TarArchiveEntry, ByteString, Option[TarArchiveEntryFirstRecord]), NotUsed] =
+  def flow(): Flow[ByteString, (TarArchiveEntry, ByteString, TarArchiveEntryRecordOrder), NotUsed] =
     Flow[ByteString]
       .via(LevelByteStringsSize(512))
       .via(TarArchive())
 }
 
-case class TarArchive() extends GraphStage[FlowShape[ByteString, (TarArchiveEntry, ByteString, Option[TarArchiveEntryFirstRecord])]] {
+case class TarArchive() extends GraphStage[FlowShape[ByteString, (TarArchiveEntry, ByteString, TarArchiveEntryRecordOrder)]] {
   val in: Inlet[ByteString] = Inlet("TarArchive.in")
-  val out: Outlet[(TarArchiveEntry, ByteString, Option[TarArchiveEntryFirstRecord])] = Outlet("TarArchive.out")
-  override val shape: FlowShape[ByteString, (TarArchiveEntry, ByteString, Option[TarArchiveEntryFirstRecord])] = FlowShape.of(in, out)
+  val out: Outlet[(TarArchiveEntry, ByteString, TarArchiveEntryRecordOrder)] = Outlet("TarArchive.out")
+  override val shape: FlowShape[ByteString, (TarArchiveEntry, ByteString, TarArchiveEntryRecordOrder)] = FlowShape.of(in, out)
 
   // We rely on all input ByteStrings being 512 bytes long, this is accomplished by attaching a LevelByteStringsSize(512)
   // Flow to the input of this Flow. Also no support for tar extensions or long filenames. But this does work fine for openimages tar files.
 
+  val firstRecord = TarArchiveEntryRecordOrder(first = true, last = false)
+  val middleRecord = TarArchiveEntryRecordOrder(first = false, last = false)
+  val lastRecord = TarArchiveEntryRecordOrder(first = false, last = true)
+  val firstLastRecord = TarArchiveEntryRecordOrder(first = true, last = true)
+
   override def createLogic(inheritedAttributes: Attributes): GraphStageLogic = new GraphStageLogic(shape) with InHandler with OutHandler {
     var curEntry: Option[TarArchiveEntry] = None
     var recordsRemaining: Long = 0
-    var firstRecord: Option[TarArchiveEntryFirstRecord] = None
+    var nextRecordOrder: TarArchiveEntryRecordOrder = firstRecord
     var readEOF: Boolean = false
 
     override def onPull(): Unit = {
@@ -57,23 +62,23 @@ case class TarArchive() extends GraphStage[FlowShape[ByteString, (TarArchiveEntr
       }
 
       if (recordsRemaining > 1) {
-        push(out, (curEntry.get, chunk, firstRecord))
+        push(out, (curEntry.get, chunk, nextRecordOrder))
         recordsRemaining -= 1
-        if (firstRecord.isDefined) {
-          firstRecord = None
+        if (recordsRemaining == 1) {
+          nextRecordOrder = lastRecord
+        } else {
+          nextRecordOrder = middleRecord
         }
       } else if (recordsRemaining == 1) {
-        push(out, (curEntry.get, chunk.slice(0, (curEntry.get.getSize % 512).toInt), firstRecord))
+        push(out, (curEntry.get, chunk.slice(0, (curEntry.get.getSize % 512).toInt), nextRecordOrder))
         recordsRemaining = 0
-        if (firstRecord.isDefined) {
-          firstRecord = None
-        }
+        nextRecordOrder = firstRecord
       } else {
         val recordIsEOF = chunk.forall(b => b == 0)
         if (recordIsEOF) {
           curEntry = None
           recordsRemaining = 0
-          firstRecord = None
+          nextRecordOrder = firstRecord
           readEOF = true
           pull(in)
         } else {
@@ -82,9 +87,14 @@ case class TarArchive() extends GraphStage[FlowShape[ByteString, (TarArchiveEntr
             failStage(TarFileCorruptedException())
           }
           recordsRemaining = curEntry.get.getSize / 512 + (if (curEntry.get.getSize % 512 != 0) 1 else 0)
-          firstRecord = Some(TarArchiveEntryFirstRecord())
+          nextRecordOrder =
+            if (recordsRemaining > 1) {
+              firstRecord
+            } else {
+              firstLastRecord
+            }
           if (recordsRemaining == 0) {
-            push(out, (curEntry.get, ByteString(), firstRecord))
+            push(out, (curEntry.get, ByteString(), nextRecordOrder))
           } else {
             pull(in)
           }
