@@ -25,7 +25,7 @@ import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, blocking}
 import scala.util.control.NonFatal
 //import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.{Await, Future}
+import scala.concurrent.Future
 import scala.util.{Failure, Success, Try}
 
 case class DownloadParams(url: String, filePath: Path, expectedSize: Long, expectedMd5: String, checkMd5IfExists: Boolean, csvLine: Map[String, ByteString])
@@ -43,7 +43,7 @@ case class Director(implicit system: ActorSystem) {
     val otherFilesFuture: Future[Done] = if (downloadMetadata) {
       Future.sequence(
         DatasetMetadata.openImagesV2DatasetMetadata.otherFiles
-          .map(downloadAndExtractMetadataFile2)
+          .map(downloadAndExtractMetadataFile)
       ).map(_ => Done)
     } else {
       Future(Done)
@@ -123,7 +123,7 @@ case class Director(implicit system: ActorSystem) {
     }
   }
 
-  private def downloadAndExtractMetadataFile2: (MetadataFile) => Future[Done] = {
+  private def downloadAndExtractMetadataFile: (MetadataFile) => Future[Done] = {
     metadataFile => {
       metadataFileSource(metadataFile)
         .log(metadataFile.uri + " http source").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel, onElement = Logging.InfoLevel))
@@ -142,34 +142,6 @@ case class Director(implicit system: ActorSystem) {
           case (Done, IOResult(_, Failure(exception))) =>
             throw exception
         }))
-    }
-  }
-
-  private def downloadAndExtractMetadataFile: (MetadataFile) => Future[Done] = {
-    metadataFile => {
-      val tarFileSource: Source[ByteString, NotUsed] = metadataFileSource(metadataFile)
-        .log(metadataFile.uri + " http source").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel, onElement = Logging.InfoLevel))
-        .withAttributes(ActorAttributes.supervisionStrategy(_ => Supervision.stop))
-        .via(metadataFileCacheFlow(metadataFile.tarGzFile))
-        .log(metadataFile.tarGzFile.name + " cache").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel))
-        .via(Compression.gunzip())
-        .via(metadataFileCacheFlow(metadataFile.tarFile))
-        .log(metadataFile.tarFile.name + " cache").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel))
-
-      val annotationsTarArchiveEntrySource: Source[(TarArchiveInputStream, TarArchiveEntry), NotUsed] = tarArchiveEntriesFromTarFile(tarFileSource)
-
-      annotationsTarArchiveEntrySource
-        .via(alsoToEagerCancelGraph(createDirsForEntrySink))
-        .runForeach({
-          blocking {
-            case ((tarArchiveInputStream: TarArchiveInputStream, tarArchiveEntry: TarArchiveEntry)) =>
-              if (!Utils.fileSizeMatchesExpected(Paths.get(tarArchiveEntry.getName), tarArchiveEntry.getSize)) {
-                Await.result(StreamConverters.fromInputStream(() => TarEntryInputStream(tarArchiveInputStream))
-                  .runWith(FileIO.toPath(Paths.get(tarArchiveEntry.getName))),
-                  Duration.Inf)
-              }
-          }
-        })
     }
   }
 
