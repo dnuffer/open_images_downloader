@@ -13,13 +13,13 @@ object Main extends App {
 
   class Conf(arguments: Seq[String]) extends ScallopConf(arguments) {
     val rootDir: ScallopOption[String] = opt[String](default = Some("/tmp/oidl"), descr = "top-level directory for storing the Open Images dataset")
-    val imagesCsv: ScallopOption[String] = opt[String](descr = "If this option is specified, only download and process the images in the indicated file.")
-    val originalImagesDir: ScallopOption[String] = opt[String](descr = "If specified, the downloaded original images will be stored in this directory. Otherwise they are placed in <open images dir>/2017_07/{train,validation,test}/images")
-    val checkMd5IfExists: ScallopOption[Boolean] = toggle(default = Some(false), descrYes = "If an image already exists locally in <image dir> and is the same size as the original, check the md5 sum of the file to determine whether to download it.")
+//    val imagesCsv: ScallopOption[String] = opt[String](descr = "If this option is specified, only download and process the images in the indicated file.")
+//    val originalImagesDir: ScallopOption[String] = opt[String](descr = "If specified, the downloaded original images will be stored in this directory. Otherwise they are placed in <open images dir>/2017_07/{train,validation,test}/images-original")
+    val checkMd5IfExists: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "If an image already exists locally in <image dir> and is the same size as the original, check the md5 sum of the file to determine whether to download it.")
     val alwaysDownload: ScallopOption[Boolean] = toggle(default = Some(false), descrYes = "Download and process all images even if the file already exists in <image dir>. This is intended for testing. The check-md5-if-exists option should be sufficient if local data corruption is suspected.")
-    val doTrain: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "Download and process images in the training set")
-    val doValidation: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "Download and process images in the validation set")
-    val doTest: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "Download and process images in the test set")
+//    val doTrain: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "Download and process images in the training set")
+//    val doValidation: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "Download and process images in the validation set")
+//    val doTest: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "Download and process images in the test set")
     val maxRetries: ScallopOption[Int] = opt[Int](default = Some(15), descr = "Number of times to retry failed downloads", validate = 0 <)
     verify()
   }
@@ -44,7 +44,7 @@ object Main extends App {
   val http = Http(system)
   val log = Logging(system, this.getClass)
 
-  val director = Director(Paths.get(conf.rootDir.getOrElse(".")))
+  val director = Director(Paths.get(conf.rootDir.getOrElse(".")), conf.checkMd5IfExists(), conf.alwaysDownload())
   director.run().onComplete({
     _ =>
       Http().shutdownAllConnectionPools().onComplete({ _ =>

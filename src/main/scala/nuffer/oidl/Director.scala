@@ -29,7 +29,7 @@ case class DownloadParams(url: String, filePath: Path, expectedSize: Long, expec
 
 case class ImageProcessingState(downloadParams: DownloadParams, needToDownload: Boolean)
 
-case class Director(rootDir: Path)(implicit system: ActorSystem) {
+case class Director(rootDir: Path, checkMd5IfExists: Boolean, alwaysDownload: Boolean)(implicit system: ActorSystem) {
   val log = Logging(system, this.getClass)
   final implicit val ec: ExecutionContext = ExecutionContext.fromExecutorService(java.util.concurrent.Executors.newCachedThreadPool())
   final implicit val materializer: ActorMaterializer = ActorMaterializer()
@@ -56,9 +56,6 @@ case class Director(rootDir: Path)(implicit system: ActorSystem) {
   }
 
   private def startDownloadingImages: Future[Done] = {
-    val checkMd5IfExists = false
-    val alwaysDownload = false
-
     val csvLineFlow: Flow[ByteString, Map[String, ByteString], NotUsed] =
       TarArchive.subflowPerEntry(SubstreamCancelStrategy.drain)
         .via(alsoToEagerCancelGraph(
