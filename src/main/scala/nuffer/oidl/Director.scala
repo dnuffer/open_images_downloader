@@ -34,7 +34,9 @@ case class Director(rootDir: Path,
                     alwaysDownload: Boolean,
                     saveTarBalls: Boolean,
                     downloadMetadata: Boolean,
-                    downloadImages: Boolean)(implicit system: ActorSystem) {
+                    downloadImages: Boolean,
+                    saveOriginalImages: Boolean,
+                    resizeImages: Boolean)(implicit system: ActorSystem) {
   val log = Logging(system, this.getClass)
   final implicit val ec: ExecutionContext = ExecutionContext.fromExecutorService(java.util.concurrent.Executors.newCachedThreadPool())
   final implicit val materializer: ActorMaterializer = ActorMaterializer()
@@ -231,8 +233,15 @@ case class Director(rootDir: Path,
 
   private def processJpegBytes: (Try[(Source[ByteString, Any], ImageProcessingState)]) => Future[Try[(IOResult, DigestResult, ImageProcessingState)]] = {
     case Success((dataBytes, state@ImageProcessingState(downloadParams, _))) =>
-      val tupleOfFutures: (Future[Done], Future[(IOResult, DigestResult)]) = dataBytes
-        .alsoToMat(resizeImageAndSaveToFile(resizedImagePath(downloadParams.filePath)))(Keep.right)
+      val sourceWithOptionalResize: Source[ByteString, Future[Done]] =
+        if (resizeImages) {
+          dataBytes
+            .alsoToMat(resizeImageAndSaveToFile(resizedImagePath(downloadParams.filePath)))(Keep.right)
+        } else {
+          dataBytes.mapMaterializedValue(_ => Future(Done))
+        }
+
+      val tupleOfFutures: (Future[Done], Future[(IOResult, DigestResult)]) = sourceWithOptionalResize
         .toMat(saveToFileIfNotPresentAndComputeMd5(downloadParams.filePath, state.needToDownload))(Keep.both)
         .run()
 
@@ -380,11 +389,12 @@ case class Director(rootDir: Path,
   }
 
   private def saveToFileIfNotPresentAndComputeMd5(filePath: Path, needToDownload: Boolean): Sink[ByteString, Future[(IOResult, DigestResult)]] = {
-    if (needToDownload) {
+    if (needToDownload && saveOriginalImages) {
       Files.createDirectories(filePath.getParent) // theoretically this should be done during materialization, but somehow that's a race condition with FileIO.toPath() and so causes random failures.
       broadcastToSinksSingleFuture(FileIO.toPath(filePath), md5Sink)
     } else {
-      md5Sink.mapMaterializedValue(_.map((IOResult(Files.size(filePath), Success(Done)), _)))
+      val size = try Files.size(filePath) catch { case NonFatal(_) => 0 }
+      md5Sink.mapMaterializedValue(_.map((IOResult(size, Success(Done)), _)))
     }
   }
 

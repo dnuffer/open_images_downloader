@@ -25,9 +25,11 @@ object Main extends App {
     val alwaysDownload: ScallopOption[Boolean] = toggle(default = Some(false), descrYes = "Download and process all images even if the file already exists in <image dir>. This is intended for testing. The check-md5-if-exists option should be sufficient if local data corruption is suspected.")
     val maxRetries: ScallopOption[Int] = opt[Int](default = Some(15), descr = "Number of times to retry failed downloads", validate = 0 <)
     val logFile: ScallopOption[String] = opt[String](default = Some("-"), descr = "Write a log to <file>. Specify - for stdout")
-    val saveTarBalls: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Save the downloaded .tar.gz and .tar files. This uses more space but can save time when resuming from an interrupted execution.")
-    val downloadMetadata: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Download and extract the metadata files (annotations and classes)")
+    val saveTarBalls: ScallopOption[Boolean] = opt[Boolean](default = Some(false), descr = "Save the downloaded .tar.gz and .tar files. This uses more space but can save time when resuming from an interrupted execution.")
+    val downloadMetadata: ScallopOption[Boolean] = opt[Boolean](default = Some(false), descr = "Download and extract the metadata files (annotations and classes)")
     val downloadImages: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Download and extract images_2017_07.tar.gz and all images")
+    val saveOriginalImages: ScallopOption[Boolean] = opt[Boolean](default = Some(false), descr = "Save full-size original images. This will use over 10 TB of space.")
+    val resizeImages: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Resize images.")
     verify()
   }
 
@@ -97,7 +99,9 @@ object Main extends App {
     conf.alwaysDownload(),
     conf.saveTarBalls(),
     conf.downloadMetadata(),
-    conf.downloadImages())
+    conf.downloadImages(),
+    conf.saveOriginalImages(),
+    conf.resizeImages())
 
   director.run().onComplete({
     _ =>
