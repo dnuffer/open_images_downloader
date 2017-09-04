@@ -4,10 +4,6 @@ TODO:
 * output progress messages to console
 * optionally download 300k urls. Thumbnail300KURL field. Missing for a number of rows, use the original url in that case.
 * create command line options to control behavior:
-    * download & extract metadata files
-    * save .tar.gz files
-    * save .tar files
-    * save .tar contents
     * option to resize
         * output format
         * min/max side
@@ -18,9 +14,15 @@ TODO:
     * output dir(s)
 * Use sbt-native-packager to create release files https://github.com/sbt/sbt-native-packager
 
-* ncurses based progress UI
-* graphical progress UI
-    * display images as they are downloaded
+* UI
+    * Show last 100(?) successful downloads
+    * Show last 100(?) failed downloads
+    * Show downloads in progress w/percentage complete
+    * Show # of resizes in progress 
+    * Show overall number of downloads w/% of total completed
+    * ncurses based progress UI
+    * graphical progress UI
+        * display images as they are downloaded
 * optionally convert from non-standard cmyk format
 * optionally convert from png
 * optionally discard png

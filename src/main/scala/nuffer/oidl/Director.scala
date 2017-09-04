@@ -29,13 +29,17 @@ case class DownloadParams(url: String, filePath: Path, expectedSize: Long, expec
 
 case class ImageProcessingState(downloadParams: DownloadParams, needToDownload: Boolean)
 
-case class Director(rootDir: Path, checkMd5IfExists: Boolean, alwaysDownload: Boolean)(implicit system: ActorSystem) {
+case class Director(rootDir: Path,
+                    checkMd5IfExists: Boolean,
+                    alwaysDownload: Boolean,
+                    saveTarBalls: Boolean,
+                    downloadMetadata: Boolean,
+                    downloadImages: Boolean)(implicit system: ActorSystem) {
   val log = Logging(system, this.getClass)
   final implicit val ec: ExecutionContext = ExecutionContext.fromExecutorService(java.util.concurrent.Executors.newCachedThreadPool())
   final implicit val materializer: ActorMaterializer = ActorMaterializer()
 
   def run(): Future[Done] = {
-    val downloadMetadata = true
 
     val otherFilesFuture: Future[Done] = if (downloadMetadata) {
       Future.sequence(
@@ -46,8 +50,9 @@ case class Director(rootDir: Path, checkMd5IfExists: Boolean, alwaysDownload: Bo
       Future(Done)
     }
 
-
-    val imagesFuture: Future[Done] = startDownloadingImages
+    val imagesFuture: Future[Done] =
+      if (downloadImages) startDownloadingImages
+      else Future(Done)
 
     for {
       _ <- otherFilesFuture
@@ -453,7 +458,7 @@ case class Director(rootDir: Path, checkMd5IfExists: Boolean, alwaysDownload: Bo
     CacheFile.flow(filename = rootDir.resolve(Paths.get(metadataFileDetails.name)),
       expectedSize = metadataFileDetails.size,
       expectedMd5 = Some(dehexify(metadataFileDetails.md5sum)),
-      saveFile = true,
+      saveFile = saveTarBalls,
       useSelfDeletingTempFile = true)
   }
 
