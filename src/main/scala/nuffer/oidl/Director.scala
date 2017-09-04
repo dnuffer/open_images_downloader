@@ -1,6 +1,5 @@
 package nuffer.oidl
 
-import java.io.InputStream
 import java.nio.channels.SeekableByteChannel
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths, StandardOpenOption}
@@ -14,18 +13,16 @@ import akka.http.scaladsl.model._
 import akka.http.scaladsl.model.headers.Location
 import akka.stream._
 import akka.stream.alpakka.csv.scaladsl.{CsvParsing, CsvToMap}
-import akka.stream.scaladsl.{Broadcast, Compression, FileIO, Flow, GraphDSL, Keep, Sink, Source, StreamConverters}
+import akka.stream.scaladsl.{Broadcast, Compression, Concat, FileIO, Flow, GraphDSL, Keep, Sink, Source}
 import akka.util.ByteString
 import akka.{Done, NotUsed}
 import nuffer.oidl.Utils.{broadcastToSinksSingleFuture, decodeBase64Md5, dehexify, hexify}
-import org.apache.commons.compress.archivers.tar.{TarArchiveEntry, TarArchiveInputStream}
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 
 import scala.annotation.unchecked.uncheckedVariance
-import scala.concurrent.duration._
-import scala.concurrent.{ExecutionContext, blocking}
+import scala.collection.immutable
+import scala.concurrent.{ExecutionContext, Future}
 import scala.util.control.NonFatal
-//import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.Future
 import scala.util.{Failure, Success, Try}
 
 case class DownloadParams(url: String, filePath: Path, expectedSize: Long, expectedMd5: String, checkMd5IfExists: Boolean, csvLine: Map[String, ByteString])
@@ -53,31 +50,52 @@ case class Director(implicit system: ActorSystem) {
     val imagesFuture: Future[Done] = startDownloadingImages
 
     for {
-      otherFiles <- otherFilesFuture
-      images <- imagesFuture
+      _ <- otherFilesFuture
+      _ <- imagesFuture
     } yield Done
   }
 
-  private def startDownloadingImages = {
+  private def startDownloadingImages: Future[Done] = {
     val checkMd5IfExists = false
     val alwaysDownload = false
 
-    val tarSource: Source[ByteString, NotUsed] = metadataFileSource(DatasetMetadata.openImagesV2DatasetMetadata.imagesFile)
-      .log("images http source").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel, onElement = Logging.InfoLevel))
+    val csvLineFlow: Flow[ByteString, Map[String, ByteString], NotUsed] =
+      TarArchive.subflowPerEntry(SubstreamCancelStrategy.drain)
+        .via(alsoToEagerCancelGraph(
+          Flow[(TarArchiveEntry, ByteString)]
+            .map(tae => Paths.get(tae._1.getName).getParent)
+            .via(Unique.flow())
+            .via(alsoToEagerCancelGraph(Sink.foreach(createResultsCsvInDir)))
+            .to(Sink.foreach(dir => Files.createDirectories(dir)))
+        ))
+        .prefixAndTail(1)
+        .map {
+          case (seq: immutable.Seq[(TarArchiveEntry, ByteString)], source: Source[(TarArchiveEntry, ByteString), NotUsed]) =>
+            (seq.head, Source.combine(Source(seq), source)(Concat(_)))
+        }
+        .map {
+          case ((tae: TarArchiveEntry, _: ByteString), source: Source[(TarArchiveEntry, ByteString), NotUsed]) =>
+            source
+              .map(_._2)
+              .via(cacheFileForTarEntry(tae))
+        }
+        .flatMapConcat(source => source
+          .via(csvLineScanner)
+          .via(CsvToMap.toMap())
+          // TODO: maybe add this back in using unzip/zip in a custom graph to pass the tarEntry down to the point.
+          //            .map(_.updated(csvFilenameKey, ByteString(tarEntry.getName)))
+        ).concatSubstreams
+
+    metadataFileSource(DatasetMetadata.openImagesV2DatasetMetadata.imagesFile)
+//      .log("images http source").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel, onElement = Logging.InfoLevel))
       .withAttributes(ActorAttributes.supervisionStrategy(_ => Supervision.Stop))
       .via(metadataFileCacheFlow(DatasetMetadata.openImagesV2DatasetMetadata.imagesFile.tarGzFile))
-      .log("images.tar.gz cache").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel))
+//      .log("images.tar.gz cache").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel))
       .via(Compression.gunzip())
       .via(metadataFileCacheFlow(DatasetMetadata.openImagesV2DatasetMetadata.imagesFile.tarFile))
-      .log("images.tar cache").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel))
-
-    val tarArchiveEntrySource: Source[(TarArchiveInputStream, TarArchiveEntry), NotUsed] = tarArchiveEntriesFromTarFile(tarSource)
-
-    val imagesFuture: Future[Done] = tarArchiveEntrySource
-      .via(alsoToEagerCancelGraph(createDirsForEntrySink)) // don't use .alsoTo(), use Broadcast( , eagerCancel=true) to avoid consuming the entire input stream when downstream cancels.
-      .via(alsoToEagerCancelGraph(Sink.foreach(createResultsCsv)))
-      .flatMapConcat(tarArchiveEntryToCsvLines)
-      .take(101) // for testing purposes, limit to 100
+//      .log("images.tar cache").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel))
+      .via(csvLineFlow)
+      .take(100) // for testing purposes, limit to 100
       .alsoTo(countAndPrintNumberOfLinesPerType)
       .map(makeDownloadRequestTuple(checkMd5IfExists, _))
       .via(mapNeedToDownloadRequest(alwaysDownload))
@@ -87,8 +105,10 @@ case class Director(implicit system: ActorSystem) {
       .alsoTo(Sink.foreach(writeResultToCsv))
       .watchTermination()(makeTerminationHandler)
       .runWith(Sink.ignore)
-    //      .runWith(Sink.foreach(println))
-    imagesFuture
+  }
+
+  private def csvLineScanner: Graph[FlowShape[ByteString, List[ByteString]], NotUsed] = {
+    CsvParsing.lineScanner(CsvParsing.Comma, CsvParsing.DoubleQuote, '\0')
   }
 
   private def getExtractTarArchiveEntryDataToFiles: () => ((TarArchiveEntry, ByteString, TarArchiveEntryRecordOrder)) => List[IOResult] = () => {
@@ -97,10 +117,11 @@ case class Director(implicit system: ActorSystem) {
     (_: (TarArchiveEntry, ByteString, TarArchiveEntryRecordOrder)) match {
       case (tarArchiveEntry: TarArchiveEntry, bytes: ByteString, order: TarArchiveEntryRecordOrder) =>
         if (order.first) {
-          log.info(s"Got first record for ${tarArchiveEntry.getName}")
+          log.info(s"Got first record for ${tarArchiveEntry.getName}. Size: ${tarArchiveEntry.getSize}")
           val path = Paths.get(tarArchiveEntry.getName)
-          chan = if (fileHasSize(path, tarArchiveEntry.getSize)) {
+          chan = if (!fileHasSize(path, tarArchiveEntry.getSize)) {
             Files.createDirectories(path.getParent)
+            bytesWritten = 0
             Some(Files.newByteChannel(path, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE))
           } else {
             None
@@ -126,19 +147,21 @@ case class Director(implicit system: ActorSystem) {
   private def downloadAndExtractMetadataFile: (MetadataFile) => Future[Done] = {
     metadataFile => {
       metadataFileSource(metadataFile)
-        .log(metadataFile.uri + " http source").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel, onElement = Logging.InfoLevel))
+//        .log(metadataFile.uri + " http source").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel, onElement = Logging.InfoLevel))
         .withAttributes(ActorAttributes.supervisionStrategy(_ => Supervision.stop))
         .via(metadataFileCacheFlow(metadataFile.tarGzFile))
-        .log(metadataFile.tarGzFile.name + " cache").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel))
+//        .log(metadataFile.tarGzFile.name + " cache").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel))
         .via(Compression.gunzip())
         .via(metadataFileCacheFlow(metadataFile.tarFile))
-        .log(metadataFile.tarFile.name + " cache").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel))
+//        .log(metadataFile.tarFile.name + " cache").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel))
         .via(TarArchive.flow())
+        .log(metadataFile.tarFile.name + " entries and data").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel))
         .statefulMapConcat(getExtractTarArchiveEntryDataToFiles)
+        .log(metadataFile.tarFile.name + " IOResults").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel, onElement = Logging.InfoLevel))
         .runWith(Sink.fold(Done)({
           case (Done, IOResult(_, Success(Done))) =>
             Done
-            // If a write failed and an IOResult failure happened, fail the stream
+          // If a write failed and an IOResult failure happened, fail the stream
           case (Done, IOResult(_, Failure(exception))) =>
             throw exception
         }))
@@ -163,12 +186,12 @@ case class Director(implicit system: ActorSystem) {
 
   private def writeResultToCsv: Try[ImageProcessingState] => Unit = {
     case Success(state) =>
-      Files.write(Paths.get(state.downloadParams.csvLine(csvFilenameKey).utf8String).resolveSibling(imagesSuccessCsvFilename),
+      Files.write(Paths.get("2017_07").resolve(state.downloadParams.csvLine("Subset").utf8String).resolve(imagesSuccessCsvFilename),
         csvHeaderArray.map(columnName => quoteAuthorAndTitle(state.downloadParams.csvLine(columnName).utf8String, columnName)).mkString("", ",", "\n").getBytes(StandardCharsets.UTF_8),
         StandardOpenOption.APPEND, StandardOpenOption.WRITE)
     case Failure(exception: ImageProcessingException) =>
       val csvLine = exception.state.downloadParams.csvLine.updated("FailureDetails", ByteString(quote(exception.getMessage)))
-      Files.write(Paths.get(csvLine(csvFilenameKey).utf8String).resolveSibling(imagesFailureCsvFilename),
+      Files.write(Paths.get("2017_07").resolve(csvLine("Subset").utf8String).resolve(imagesFailureCsvFilename),
         failureCsvHeaderArray.map(columnName => quoteAuthorAndTitle(csvLine(columnName).utf8String, columnName)).mkString("", ",", "\n").getBytes(StandardCharsets.UTF_8),
         StandardOpenOption.APPEND, StandardOpenOption.WRITE)
     case Failure(exception: Throwable) =>
@@ -181,27 +204,24 @@ case class Director(implicit system: ActorSystem) {
   val failureCsvHeader: String = csvHeader.substring(0, csvHeader.length - 1) + ",FailureDetails\n"
   val failureCsvHeaderArray: Array[String] = failureCsvHeader.substring(0, failureCsvHeader.length - 1).split(',')
 
-  private def createResultsCsv: ((TarArchiveInputStream, TarArchiveEntry)) => Unit = {
-
-    case (tarArchiveInputStream: TarArchiveInputStream, tarArchiveEntry: TarArchiveEntry) =>
-      val entryPath = Paths.get(tarArchiveEntry.getName)
-      val successPath = entryPath.resolveSibling(imagesSuccessCsvFilename)
-      Files.write(successPath, csvHeader.getBytes(StandardCharsets.UTF_8))
-      val failurePath = entryPath.resolveSibling(imagesFailureCsvFilename)
-      Files.write(failurePath, failureCsvHeader.getBytes(StandardCharsets.UTF_8))
+  private def createResultsCsvInDir(dirPath: Path) = {
+    val successPath = dirPath.resolve(imagesSuccessCsvFilename)
+    Files.write(successPath, csvHeader.getBytes(StandardCharsets.UTF_8))
+    val failurePath = dirPath.resolve(imagesFailureCsvFilename)
+    Files.write(failurePath, failureCsvHeader.getBytes(StandardCharsets.UTF_8))
   }
 
   private def startDownloadOrFromFile: Graph[FlowShape[(HttpRequest, ImageProcessingState), Try[(Source[ByteString, Any], ImageProcessingState)]], NotUsed] = {
     IfThenElse.flow(
       {
-        case (request: HttpRequest, state: ImageProcessingState) => state.needToDownload
+        case (_: HttpRequest, state: ImageProcessingState) => state.needToDownload
       },
       Flow[(HttpRequest, ImageProcessingState)]
         .via(Http().superPool())
         .mapAsyncUnordered(100 /* TODO: make this the same size as the number of http streams */)(processHttpResponse)
       ,
       Flow[(HttpRequest, ImageProcessingState)].map({
-        case (request: HttpRequest, state: ImageProcessingState) =>
+        case (_: HttpRequest, state: ImageProcessingState) =>
           Success((FileIO.fromPath(state.downloadParams.filePath), state))
       })
     )
@@ -209,7 +229,7 @@ case class Director(implicit system: ActorSystem) {
 
   private def processJpegBytes: (Try[(Source[ByteString, Any], ImageProcessingState)]) => Future[Try[(IOResult, DigestResult, ImageProcessingState)]] = {
     case Success((dataBytes, state@ImageProcessingState(downloadParams, _))) =>
-      val tupleOfFutures = dataBytes
+      val tupleOfFutures: (Future[Done], Future[(IOResult, DigestResult)]) = dataBytes
         .alsoToMat(resizeImageAndSaveToFile(resizedImagePath(downloadParams.filePath)))(Keep.right)
         .toMat(saveToFileIfNotPresentAndComputeMd5(downloadParams.filePath, state.needToDownload))(Keep.both)
         .run()
@@ -220,7 +240,7 @@ case class Director(implicit system: ActorSystem) {
       // convert it to a Try and include state.
       joinedFuture
         .map({
-          case (done, (ioResult, digestResult)) => Success((ioResult, digestResult, state))
+          case (_, (ioResult, digestResult)) => Success((ioResult, digestResult, state))
         })
         .recover({
           case exception => Failure(ImageUnknownException(state, exception))
@@ -232,16 +252,11 @@ case class Director(implicit system: ActorSystem) {
       Future.successful(Failure(exception))
   }
 
-  private def keepSuccess[T]: (Try[T]) => Boolean = {
-    case Success(_) => true
-    case _ => false
-  }
-
   private def processHttpResponse: ((Try[HttpResponse], ImageProcessingState)) => Future[Try[(Source[ByteString, Any], ImageProcessingState)]] = {
 
     // server replied with a 200 OK
-    case (Success(HttpResponse(StatusCodes.OK, _, entity1, _)), state@ImageProcessingState(downloadParams@DownloadParams(url: String, _, expectedSize: Long, _, _, _), _)) =>
-      log.info("{} OK. Content-Type: {}", url, entity1.contentType)
+    case (Success(HttpResponse(StatusCodes.OK, _, entity1, _)), state@ImageProcessingState(DownloadParams(url: String, _, expectedSize: Long, _, _, _), _)) =>
+//      log.info("{} OK. Content-Type: {}", url, entity1.contentType)
       val entity = entity1.withSizeLimit(expectedSize)
       entity.contentType match {
         case Binary(MediaTypes.`image/jpeg`) =>
@@ -267,9 +282,9 @@ case class Director(implicit system: ActorSystem) {
     case (Success(resp@HttpResponse(Redirection(_), _, _, _)), state@ImageProcessingState(downloadParams, _)) =>
       resp.header[Location] match {
         case Some(location) =>
-          log.info("{}: location: {}", downloadParams.url, location)
+//          log.info("{}: location: {}", downloadParams.url, location)
           if (location.uri.path.toString().endsWith("/photo_unavailable.png") || location.uri.path.toString.endsWith("/photo_unavailable_l.png")) {
-            log.info("Got a photo unavailable redirect.")
+//            log.info("Got a photo unavailable redirect.")
           }
         case None =>
           log.error("{}: Got redirect without Location header", downloadParams.url)
@@ -286,13 +301,13 @@ case class Director(implicit system: ActorSystem) {
         case _ => Failure(RequestFailedException(downloadParams.url, "", state))
       }
 
-    case (Failure(exception), state@ImageProcessingState(downloadParams, _)) =>
+    case (Failure(exception), ImageProcessingState(downloadParams, _)) =>
       log.error("{}: Request failed: {}", downloadParams.url, exception)
       Future.successful(Failure(exception))
   }
 
   private def handleResponseError(entity: ResponseEntity, exception: Throwable) = {
-    val MTU_BYTES: Long = 1500 // since we've got at least one packet already, we can discard some without blocking, and possibly re-use the connection.
+    //    val MTU_BYTES: Long = 1500 // since we've got at least one packet already, we can discard some without blocking, and possibly re-use the connection.
     // Sure there's the headers (~730 bytes from flickr.com) not being accounted for and transfer encoding, so this is just a hopefully-effective heuristic.
     val REDIRECT_BYTES: Long = 3213 // the not available redirect includes this many bytes. With headers, this should limit to reading 3 packets.
     entity.withSizeLimit(REDIRECT_BYTES).discardBytes().future().transform(_ => Success(Failure(exception)))
@@ -311,7 +326,7 @@ case class Director(implicit system: ActorSystem) {
         }
         Failure(MD5SumMismatch(state))
       } else {
-        log.info("Request data completely read for {}. {} bytes.", downloadParams.url, count)
+//        log.info("Request data completely read for {}. {} bytes.", downloadParams.url, count)
         Success(state)
       }
     case Success((IOResult(_, Failure(error)), _, state@ImageProcessingState(downloadParams, _))) =>
@@ -355,7 +370,7 @@ case class Director(implicit system: ActorSystem) {
                 log.error("Resize Failed: {}", error)
                 System.err.println("Resize Failed: " + error)
               case Success(_) =>
-                log.info("done resizing")
+//                log.info("done resizing")
             })
             mat
         })
@@ -402,17 +417,13 @@ case class Director(implicit system: ActorSystem) {
 
   }
 
-  private def filterNeedToDownload(alwaysDownload: Boolean): Flow[(HttpRequest, DownloadParams), (HttpRequest, ImageProcessingState), NotUsed] =
-    mapNeedToDownloadRequest(alwaysDownload)
-      .filter(_._2.needToDownload)
-
   private def mapNeedToDownloadRequest(alwaysDownload: Boolean): Flow[(HttpRequest, DownloadParams), (HttpRequest, ImageProcessingState), NotUsed] = {
     Flow[(HttpRequest, DownloadParams)]
       .mapAsyncUnordered(Runtime.getRuntime.availableProcessors() * 2)(needToDownloadRequest(alwaysDownload))
   }
 
   private def needToDownloadRequest(alwaysDownload: Boolean): ((HttpRequest, DownloadParams)) => Future[(HttpRequest, ImageProcessingState)] = {
-    case downloadRequestTuple@(downloadRequest: HttpRequest, downloadUrlToFile: DownloadParams) =>
+    case downloadRequestTuple@(_: HttpRequest, downloadUrlToFile: DownloadParams) =>
       for {
         nd <- needToDownload(downloadUrlToFile, alwaysDownload)
       } yield (downloadRequestTuple._1, ImageProcessingState(downloadRequestTuple._2, nd))
@@ -431,76 +442,11 @@ case class Director(implicit system: ActorSystem) {
     }))
   }
 
-  private def tarArchiveEntryToCsvLines(tarArchiveEntry: (TarArchiveInputStream, TarArchiveEntry)): Source[Map[String, ByteString], Future[IOResult]] = tarArchiveEntry match {
-    case (tarArchiveInputStream, tarEntry) =>
-      StreamConverters.fromInputStream(() => TarEntryInputStream(tarArchiveInputStream))
-        .withAttributes(Attributes.name("tarEntryInputStream Source").and(ActorAttributes.IODispatcher))
-        .via(cacheFileForTarEntry(tarEntry))
-        .via(CsvParsing.lineScanner(CsvParsing.Comma, CsvParsing.DoubleQuote, '\0'))
-        .via(CsvToMap.toMap())
-        .map(line => line.updated(csvFilenameKey, ByteString(tarEntry.getName)))
-  }
-
-  private def createDirsForEntrySink: Sink[(TarArchiveInputStream, TarArchiveEntry), Future[Done]] = {
-    Sink.foreach[(TarArchiveInputStream, TarArchiveEntry)]({
-      case (tarArchiveInputStream, tarEntry) =>
-        log.info("tarEntry.name: {}", tarEntry.getName)
-        Paths.get(tarEntry.getName).getParent.toFile.mkdirs()
-    })
-  }
-
   private def cacheFileForTarEntry(tarEntry: TarArchiveEntry): Graph[FlowShape[ByteString, ByteString], NotUsed] = {
     CacheFile.flow(filename = Paths.get(tarEntry.getName),
       expectedSize = tarEntry.getSize,
       saveFile = true,
       useSelfDeletingTempFile = true)
-  }
-
-  private def tarArchiveEntriesFromTarFile(tarSource: Source[ByteString, NotUsed]): Source[(TarArchiveInputStream, TarArchiveEntry), NotUsed] = {
-    tarSource
-      .toMat(StreamConverters.asInputStream(readTimeout = Long.MaxValue.nanoseconds))(Keep.right)
-      .mapMaterializedValue(sourceFromTarInputStream)
-      .run()
-  }
-
-  private def sourceFromTarInputStream2(tarInputStream: InputStream): Source[(TarArchiveInputStream, TarArchiveEntry), NotUsed] = {
-    Source.unfoldResourceAsync(
-      () => Future {new TarArchiveInputStream(tarInputStream)},
-      (tarArchiveInputStream: TarArchiveInputStream) => Future {
-        blocking {
-          val nextTarEntry: TarArchiveEntry = tarArchiveInputStream.getNextTarEntry
-          if (nextTarEntry != null)
-            if (nextTarEntry.isCheckSumOK) {
-              Some((tarArchiveInputStream, nextTarEntry))
-            } else {
-              throw new TarFileCorruptedException
-            }
-          else
-            None // TODO: this needs to be a future that waits for all the downstream reading of the tar archive stream to be completed.
-        }
-      },
-      (tarArchiveInputStream: TarArchiveInputStream) => Future { blocking { tarArchiveInputStream.close() } }.map(_ => Done)
-    )
-  }
-
-  private def sourceFromTarInputStream(tarInputStream: InputStream): Source[(TarArchiveInputStream, TarArchiveEntry), NotUsed] = {
-    val tarArchiveInputStream = new TarArchiveInputStream(tarInputStream)
-    Source.unfoldAsync(tarArchiveInputStream) {
-      tarArchiveInputStream: TarArchiveInputStream =>
-        Future {
-          blocking {
-            val nextTarEntry: TarArchiveEntry = tarArchiveInputStream.getNextTarEntry
-            if (nextTarEntry != null)
-              if (nextTarEntry.isCheckSumOK) {
-                Some((tarArchiveInputStream, (tarArchiveInputStream, nextTarEntry)))
-              } else {
-                throw new TarFileCorruptedException
-              }
-            else
-              None
-          }
-        }
-    }
   }
 
   private def metadataFileSource(metadataFile: MetadataFile): Source[ByteString, NotUsed] = {
@@ -515,21 +461,21 @@ case class Director(implicit system: ActorSystem) {
       useSelfDeletingTempFile = true)
   }
 
-//  private def httpGetDataSource(uri: String, fileSize: Long): Source[ByteString, NotUsed] = {
-//    Source.fromFuture(Http().singleRequest(HttpRequest(uri = uri)))
-//      .log("http GET " + uri).withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel, onFinish = Logging.InfoLevel))
-//      .flatMapConcat(httpResponse => httpResponse.entity.withSizeLimit(fileSize).dataBytes)
-//  }
+  //  private def httpGetDataSource(uri: String, fileSize: Long): Source[ByteString, NotUsed] = {
+  //    Source.fromFuture(Http().singleRequest(HttpRequest(uri = uri)))
+  //      .log("http GET " + uri).withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel, onFinish = Logging.InfoLevel))
+  //      .flatMapConcat(httpResponse => httpResponse.entity.withSizeLimit(fileSize).dataBytes)
+  //  }
 
   private def httpGetDataSource(uri: String, fileSize: Long): Source[ByteString, NotUsed] = {
     Source.single((HttpRequest(uri = uri), uri))
-      .log("http request GET " + uri).withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel, onFinish = Logging.InfoLevel))
+//      .log("http request GET " + uri).withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel, onFinish = Logging.InfoLevel))
       .via(Http().superPool())
-      .log("http response GET " + uri).withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel, onFinish = Logging.InfoLevel))
+//      .log("http response GET " + uri).withAttributes(Attributes.logLevels(onElement = Logging.InfoLevel, onFinish = Logging.InfoLevel))
       .flatMapConcat({
-        case (Success(httpRepsonse), uri) =>
+        case (Success(httpRepsonse), _) =>
           httpRepsonse.entity.withSizeLimit(fileSize).dataBytes
-        case (Failure(exception), uri) =>
+        case (Failure(exception), _) =>
           Source.failed(exception)
       })
   }

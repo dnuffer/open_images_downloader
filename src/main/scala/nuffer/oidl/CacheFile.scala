@@ -31,7 +31,7 @@ object CacheFile {
 
     val fileSizeMatchesExpected = Utils.fileSizeMatchesExpected(filename, expectedSize)
 
-    log.info("CacheFile.flow filename: {}, fileSizeMatchesExpected: {}", filename, fileSizeMatchesExpected)
+//    log.info("CacheFile.flow filename: {}, fileSizeMatchesExpected: {}", filename, fileSizeMatchesExpected)
     //    val canImmediatelyUseFileForInput: Boolean = expectedMd5.isEmpty && fileSizeMatchesExpected
     val canImmediatelyUseFileForInput: Boolean = fileSizeMatchesExpected
 
