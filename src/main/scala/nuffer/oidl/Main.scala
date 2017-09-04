@@ -1,5 +1,7 @@
 package nuffer.oidl
 
+import java.nio.file.Paths
+
 import akka.actor.ActorSystem
 import akka.event.Logging
 import akka.http.scaladsl.Http
@@ -10,7 +12,7 @@ import org.rogach.scallop.{ScallopConf, ScallopOption}
 object Main extends App {
 
   class Conf(arguments: Seq[String]) extends ScallopConf(arguments) {
-    val rootDir: ScallopOption[String] = opt[String](descr = "top-level directory for storing the Open Images dataset")
+    val rootDir: ScallopOption[String] = opt[String](default = Some("/tmp/oidl"), descr = "top-level directory for storing the Open Images dataset")
     val imagesCsv: ScallopOption[String] = opt[String](descr = "If this option is specified, only download and process the images in the indicated file.")
     val originalImagesDir: ScallopOption[String] = opt[String](descr = "If specified, the downloaded original images will be stored in this directory. Otherwise they are placed in <open images dir>/2017_07/{train,validation,test}/images")
     val checkMd5IfExists: ScallopOption[Boolean] = toggle(default = Some(false), descrYes = "If an image already exists locally in <image dir> and is the same size as the original, check the md5 sum of the file to determine whether to download it.")
@@ -42,7 +44,7 @@ object Main extends App {
   val http = Http(system)
   val log = Logging(system, this.getClass)
 
-  val director = Director()
+  val director = Director(Paths.get(conf.rootDir.getOrElse(".")))
   director.run().onComplete({
     _ =>
       Http().shutdownAllConnectionPools().onComplete({ _ =>
