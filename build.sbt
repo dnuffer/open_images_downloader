@@ -35,3 +35,6 @@ libraryDependencies += "org.im4java" % "im4java" % "1.4.0"
 
 // for testing image libraries
 libraryDependencies += "com.lightbend.akka" %% "akka-stream-alpakka-file" % "0.11"
+
+libraryDependencies += "com.typesafe.akka" %% "akka-slf4j" % akkaVersion
+libraryDependencies += "ch.qos.logback" % "logback-classic" % "1.2.3"

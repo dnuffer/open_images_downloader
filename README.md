@@ -1,7 +1,6 @@
 # Open Images dataset downloader
 
 TODO:
-* option to save logs to a file
 * output progress messages to console
 * optionally download 300k urls. Thumbnail300KURL field. Missing for a number of rows, use the original url in that case.
 * create command line options to control behavior:
