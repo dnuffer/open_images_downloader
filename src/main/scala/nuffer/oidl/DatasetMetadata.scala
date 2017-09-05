@@ -19,8 +19,8 @@ object DatasetMetadata {
   val openImagesV2DatasetMetadata = DatasetMetadata(
     imagesFile = MetadataFile(
       description = "Image URLs and metadata",
-//      uri = "https://storage.googleapis.com/openimages/2017_07/images_2017_07.tar.gz",
-      uri = "http://localhost:7585/images_2017_07.tar.gz",
+      uri = "https://storage.googleapis.com/openimages/2017_07/images_2017_07.tar.gz",
+//      uri = "http://localhost:7585/images_2017_07.tar.gz",
       tarGzFile = MetadataTarGzFile(
         name = "images_2017_07.tar.gz",
         size = 1038132176,
@@ -35,8 +35,8 @@ object DatasetMetadata {
     otherFiles = List(
       MetadataFile(
         description = "Bounding box annotations (train, validation, and test sets)",
-//        uri = "https://storage.googleapis.com/openimages/2017_07/annotations_human_bbox_2017_07.tar.gz",
-        uri = "http://localhost:7585/annotations_human_bbox_2017_07.tar.gz",
+        uri = "https://storage.googleapis.com/openimages/2017_07/annotations_human_bbox_2017_07.tar.gz",
+//        uri = "http://localhost:7585/annotations_human_bbox_2017_07.tar.gz",
         tarGzFile = MetadataTarGzFile(
           name = "annotations_human_bbox_2017_07.tar.gz",
           size = 38732419,
@@ -50,8 +50,8 @@ object DatasetMetadata {
       ),
       MetadataFile(
         description = "Human-verified image-level annotations (train, validation, and test sets)",
-//        uri = "https://storage.googleapis.com/openimages/2017_07/annotations_human_2017_07.tar.gz",
-        uri = "http://localhost:7585/annotations_human_2017_07.tar.gz",
+        uri = "https://storage.googleapis.com/openimages/2017_07/annotations_human_2017_07.tar.gz",
+//        uri = "http://localhost:7585/annotations_human_2017_07.tar.gz",
         tarGzFile = MetadataTarGzFile(
           name = "annotations_human_2017_07.tar.gz",
           size = 69263638,
@@ -65,8 +65,8 @@ object DatasetMetadata {
       ),
       MetadataFile(
         description = "Machine-generated image-level annotations (train, validation, and test sets)",
-//        uri = "https://storage.googleapis.com/openimages/2017_07/annotations_machine_2017_07.tar.gz",
-        uri = "http://localhost:7585/annotations_machine_2017_07.tar.gz",
+        uri = "https://storage.googleapis.com/openimages/2017_07/annotations_machine_2017_07.tar.gz",
+//        uri = "http://localhost:7585/annotations_machine_2017_07.tar.gz",
         tarGzFile = MetadataTarGzFile(
           name = "annotations_machine_2017_07.tar.gz",
           size = 468937924,
@@ -80,8 +80,8 @@ object DatasetMetadata {
       ),
       MetadataFile(
         description = "Classes and class descriptions",
-//        uri = "https://storage.googleapis.com/openimages/2017_07/classes_2017_07.tar.gz",
-        uri = "http://localhost:7585/classes_2017_07.tar.gz",
+        uri = "https://storage.googleapis.com/openimages/2017_07/classes_2017_07.tar.gz",
+//        uri = "http://localhost:7585/classes_2017_07.tar.gz",
         tarGzFile = MetadataTarGzFile(
           name = "classes_2017_07.tar.gz",
           size = 300021,

@@ -9,8 +9,8 @@ import akka.stream.ActorMaterializer
 import ch.qos.logback.classic.LoggerContext
 import ch.qos.logback.classic.layout.TTLLLayout
 import ch.qos.logback.classic.spi.ILoggingEvent
-import ch.qos.logback.core.FileAppender
 import ch.qos.logback.core.encoder.LayoutWrappingEncoder
+import ch.qos.logback.core.{ConsoleAppender, FileAppender}
 import com.typesafe.config.{ConfigFactory, ConfigValueFactory}
 import org.rogach.scallop.{ScallopConf, ScallopOption}
 
@@ -24,53 +24,64 @@ object Main extends App {
     val checkMd5IfExists: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "If an image already exists locally in <image dir> and is the same size as the original, check the md5 sum of the file to determine whether to download it.")
     val alwaysDownload: ScallopOption[Boolean] = toggle(default = Some(false), descrYes = "Download and process all images even if the file already exists in <image dir>. This is intended for testing. The check-md5-if-exists option should be sufficient if local data corruption is suspected.")
     val maxRetries: ScallopOption[Int] = opt[Int](default = Some(15), descr = "Number of times to retry failed downloads", validate = 0 <)
-    val logFile: ScallopOption[String] = opt[String](default = Some("-"), descr = "Write a log to <file>. Specify - for stdout")
+    val logFile: ScallopOption[String] = opt[String](default = None, descr = "Write a log to <file>.")
+    val logToStdout: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Whether to write the log to stdout.")
     val saveTarBalls: ScallopOption[Boolean] = opt[Boolean](default = Some(false), descr = "Save the downloaded .tar.gz and .tar files. This uses more space but can save time when resuming from an interrupted execution.")
-    val downloadMetadata: ScallopOption[Boolean] = opt[Boolean](default = Some(false), descr = "Download and extract the metadata files (annotations and classes)")
+    val downloadMetadata: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Download and extract the metadata files (annotations and classes)")
     val downloadImages: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Download and extract images_2017_07.tar.gz and all images")
     val download300K: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Download the image from the url in the Thumbnail300KURL field. This disables verifying the md5 hash and results in lower quality images, but may be much faster and use less bandwidth and storage space. These are resized to a max dim of 640, so if you use resizeMode=ShrinkToFit and resizeBoxSize=640 you can get a full consistently sized set of images. Not all images have a 300K url and so the original is downloaded and needs to be resized.")
-    val saveOriginalImages: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Save full-size original images. This will use over 10 TB of space.")
+    val saveOriginalImages: ScallopOption[Boolean] = opt[Boolean](default = Some(false), descr = "Save full-size original images. This will use over 10 TB of space.")
     val resizeImages: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Resize images.")
     val resizeMode: ScallopOption[String] = opt[String](default = Some("ShrinkToFit"), descr = "ShrinkToFit will resize images larger than the specified size of bounding box, preserving aspect ratio. Smaller images are unchanged. FillCrop will fill the bounding box, by first either shrinking or growing the image and then doing a center-crop on the larger dimension. FillDistort will fill the bounding box, by either shrinking or growing the image, modifying the aspect ratio as necessary to fit.", validate = (opt) => opt == "ShrinkToFit" || opt == "FillCrop" || opt == "FillDistort")
     val resizeBoxSize: ScallopOption[Int] = opt[Int](default = Some(224), descr = "The number of pixels used by resizing for the side of the bounding box")
-    val resizeOutputFormat: ScallopOption[String] = opt[String](default = Some("jpg"), descr = "The format (and extension) to use for the resized images. Valid values are those supported by ImageMagick. See https://www.imagemagick.org/script/formats.php or run identify -list format")
+    val resizeOutputFormat: ScallopOption[String] = opt[String](default = Some("jpg"), descr = "The format (and extension) to use for the resized images. Valid values are those supported by ImageMagick. See https://www.imagemagick.org/script/formats.php and/or run identify -list format")
     val resizeCompressionQuality: ScallopOption[Int] = opt[Int](default = None, descr = "The compression quality. If specified, it will be passed with the -quality option to imagemagick convert. See https://www.imagemagick.org/script/command-line-options.php#quality for the meaning of different values and defaults for various output formats. If unspecified, -quality will not be passed and imagemagick will use its default.")
     verify()
   }
 
   val conf = new Conf(args)
 
-  if (conf.logFile() != "-") {
-    configureLoggingToFile(conf.logFile)
-  }
+  configureLogging(conf.logFile, conf.logToStdout)
 
-  private def configureLoggingToFile(logFileOpt: ScallopOption[String]): Unit = {
-    val lc = org.slf4j.LoggerFactory.getILoggerFactory.asInstanceOf[LoggerContext]
-    lc.reset()
-    if (logFileOpt.isDefined) {
-      val fa = new FileAppender[ILoggingEvent]()
-      fa.setFile(logFileOpt())
-      fa.setContext(lc)
-      fa.setName("file")
+  private def configureLogging(logFileOpt: ScallopOption[String], logToStdoutOpt: ScallopOption[Boolean]): Unit = {
+    val logToStdout = logToStdoutOpt.getOrElse(false)
+    val loggerContext = org.slf4j.LoggerFactory.getILoggerFactory.asInstanceOf[LoggerContext]
+    loggerContext.reset()
+    if (logFileOpt.isDefined || logToStdout) {
 
       val encoder: LayoutWrappingEncoder[ILoggingEvent] = new LayoutWrappingEncoder[ILoggingEvent]()
-      encoder.setContext(lc)
+      encoder.setContext(loggerContext)
 
       // same as
       // PatternLayout layout = new PatternLayout();
       // layout.setPattern("%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n");
       val layout = new TTLLLayout
 
-      layout.setContext(lc)
+      layout.setContext(loggerContext)
       layout.start()
       encoder.setLayout(layout)
 
-      fa.setEncoder(encoder)
-      fa.start()
+      loggerContext.getLoggerList
+      val rootLogger = loggerContext.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME)
+      if (logFileOpt.isDefined) {
+        val fileAppender = new FileAppender[ILoggingEvent]()
+        fileAppender.setFile(logFileOpt())
+        fileAppender.setContext(loggerContext)
+        fileAppender.setName("file")
+        fileAppender.setEncoder(encoder)
+        fileAppender.start()
+        rootLogger.addAppender(fileAppender)
+      }
+      if (logToStdout) {
+        val consoleAppender = new ConsoleAppender[ILoggingEvent]()
+        consoleAppender.setTarget("System.out")
+        consoleAppender.setContext(loggerContext)
+        consoleAppender.setName("console")
+        consoleAppender.setEncoder(encoder)
+        consoleAppender.start()
+        rootLogger.addAppender(consoleAppender)
+      }
 
-      lc.getLoggerList
-      val rootLogger = lc.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME)
-      rootLogger.addAppender(fa)
     }
   }
 
@@ -115,8 +126,6 @@ object Main extends App {
   director.run().onComplete({
     _ =>
       Http().shutdownAllConnectionPools().onComplete({ _ =>
-        //        log.info("sleeping")
-        //        Thread.sleep(10000)
         log.info("context.system.terminate()")
         system.terminate()
       })
