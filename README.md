@@ -1,7 +1,6 @@
 # Open Images dataset downloader
 
 TODO:
-* output progress messages to console
 
 * UI
     * Show last 100(?) successful downloads
@@ -16,6 +15,10 @@ TODO:
 * optionally convert from png
 * optionally discard png
 * optionally validate the image is a proper jpeg
+* option to specify original images directory
+* option to specify resized images directory
+* option to enable/disable 3-letter image subdirs
+* option to do multiple image processes - resize to multiple sizes, multiple resize modes, convert to other formats.
 
 * output to tfrecord
 * optionally save metadata to a db (jpa?)
