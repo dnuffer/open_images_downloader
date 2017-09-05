@@ -30,6 +30,10 @@ object Main extends App {
     val downloadImages: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Download and extract images_2017_07.tar.gz and all images")
     val saveOriginalImages: ScallopOption[Boolean] = opt[Boolean](default = Some(false), descr = "Save full-size original images. This will use over 10 TB of space.")
     val resizeImages: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Resize images.")
+    val resizeMode: ScallopOption[String] = opt[String](default = Some("ShrinkToFit"), descr = "ShrinkToFit will resize images larger than the specified size of bounding box, preserving aspect ratio. Smaller images are unchanged. FillCrop will fill the bounding box, by first either shrinking or growing the image and then doing a center-crop on the larger dimension. FillDistort will fill the bounding box, by either shrinking or growing the image, modifying the aspect ratio as necessary to fit.", validate = (opt) => opt == "ShrinkToFit" || opt == "FillCrop" || opt == "FillDistort")
+    val resizeBoxSize: ScallopOption[Int] = opt[Int](default = Some(224), descr = "The number of pixels used by resizing for the side of the bounding box")
+    val resizeOutputFormat: ScallopOption[String] = opt[String](default = Some("jpg"), descr = "The format (and extension) to use for the resized images. Valid values are those supported by ImageMagick. See https://www.imagemagick.org/script/formats.php or run identify -list format")
+    val resizeCompressionQuality: ScallopOption[Int] = opt[Int](default = None, descr = "The compression quality. If specified, it will be passed with the -quality option to imagemagick convert. See https://www.imagemagick.org/script/command-line-options.php#quality for the meaning of different values and defaults for various output formats. If unspecified, -quality will not be passed and imagemagick will use its default.")
     verify()
   }
 
@@ -38,7 +42,6 @@ object Main extends App {
   if (conf.logFile() != "-") {
     configureLoggingToFile(conf.logFile)
   }
-
 
   private def configureLoggingToFile(logFileOpt: ScallopOption[String]): Unit = {
     val lc = org.slf4j.LoggerFactory.getILoggerFactory.asInstanceOf[LoggerContext]
@@ -101,7 +104,11 @@ object Main extends App {
     conf.downloadMetadata(),
     conf.downloadImages(),
     conf.saveOriginalImages(),
-    conf.resizeImages())
+    conf.resizeImages(),
+    ResizeMode.withName(conf.resizeMode()),
+    conf.resizeBoxSize(),
+    conf.resizeOutputFormat(),
+    conf.resizeCompressionQuality.toOption)
 
   director.run().onComplete({
     _ =>

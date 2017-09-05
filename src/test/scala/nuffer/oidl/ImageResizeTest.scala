@@ -133,7 +133,7 @@ class ImageResizeTest extends StreamSpec {
               .flatMapConcat(bs => Source.apply(scala.collection.immutable.List(bs)))
               .map(b => ByteString(b: _*))
               .throttle(1000, 1.second, 10, mode = ThrottleMode.Shaping)
-              .via(ImageResize.resizeJpgFlow(299))
+              .via(ImageResize.resizeShrinkToFitJpegFlow(299, "jpeg", None))
               .runWith(Sink.reduce((b: ByteString, b2: ByteString) => b.++(b2))),
             Duration.Inf)
           print(".")
@@ -154,7 +154,7 @@ class ImageResizeTest extends StreamSpec {
                 .flatMapConcat(bs => Source(scala.collection.immutable.List(bs)))
                 .map(b => ByteString(b: _*))
                 .throttle(1000, 1.second, 10, mode = ThrottleMode.Shaping)
-                .via(ImageResize.resizeJpgFlow(299))
+                .via(ImageResize.resizeShrinkToFitJpegFlow(299, "jpeg", None))
                 .runWith(Sink.reduce[ByteString](_ ++ _))
             }),
             Duration.Inf)

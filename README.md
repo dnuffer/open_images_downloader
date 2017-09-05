@@ -4,11 +4,6 @@ TODO:
 * output progress messages to console
 * optionally download 300k urls. Thumbnail300KURL field. Missing for a number of rows, use the original url in that case.
 * create command line options to control behavior:
-    * resize options
-        * min/max side
-        * output format
-        * crop to fixed aspect ratio
-        * output quality/compression level
     * download 300k urls.
 * Use sbt-native-packager to create release files https://github.com/sbt/sbt-native-packager
 

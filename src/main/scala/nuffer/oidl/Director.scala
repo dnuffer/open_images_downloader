@@ -16,6 +16,7 @@ import akka.stream.alpakka.csv.scaladsl.{CsvParsing, CsvToMap}
 import akka.stream.scaladsl.{Broadcast, Compression, Concat, FileIO, Flow, GraphDSL, Keep, Sink, Source}
 import akka.util.ByteString
 import akka.{Done, NotUsed}
+import nuffer.oidl.ResizeMode.ResizeMode
 import nuffer.oidl.Utils.{broadcastToSinksSingleFuture, decodeBase64Md5, dehexify, hexify}
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 
@@ -36,7 +37,11 @@ case class Director(rootDir: Path,
                     downloadMetadata: Boolean,
                     downloadImages: Boolean,
                     saveOriginalImages: Boolean,
-                    resizeImages: Boolean)(implicit system: ActorSystem) {
+                    resizeImages: Boolean,
+                    resizeMode: ResizeMode,
+                    resizeBoxSize: Int,
+                    resizeOutputFormat: String,
+                    resizeCompressionQuality: Option[Int])(implicit system: ActorSystem) {
   val log = Logging(system, this.getClass)
   final implicit val ec: ExecutionContext = ExecutionContext.fromExecutorService(java.util.concurrent.Executors.newCachedThreadPool())
   final implicit val materializer: ActorMaterializer = ActorMaterializer()
@@ -373,7 +378,12 @@ case class Director(rootDir: Path,
       Sink.ignore
     } else {
       Files.createDirectories(filePath.getParent) // theoretically this should be done during materialization, but somehow that's a race condition with FileIO.toPath() and so causes random failures.
-      ImageResize.resizeJpgFlow(299)
+      val resizeFlow = resizeMode match {
+        case ResizeMode.ShrinkToFit => ImageResize.resizeShrinkToFitJpegFlow(resizeBoxSize, resizeOutputFormat, resizeCompressionQuality)
+        case ResizeMode.FillCrop => ImageResize.resizeFillCropJpegFlow(resizeBoxSize, resizeOutputFormat, resizeCompressionQuality)
+        case ResizeMode.FillDistort => ImageResize.resizeFillDistortJpegFlow(resizeBoxSize, resizeOutputFormat, resizeCompressionQuality)
+      }
+      resizeFlow
         .watchTermination()({
           case (mat, eventualDone: Future[Done]) =>
             eventualDone.onComplete({
@@ -399,7 +409,16 @@ case class Director(rootDir: Path,
   }
 
   private def resizedImagePath(filePath: Path): Path = {
-    filePath.getParent.getParent.resolveSibling("images-resized").resolve(filePath.getParent.getFileName).resolve(filePath.getFileName)
+    val subsetDir = filePath.getParent.getParent
+    val resizedDir = subsetDir.resolveSibling("images-resized")
+    val threeCharPrefix = filePath.getParent.getFileName
+    val resizedImageDir = resizedDir.resolve(threeCharPrefix)
+    val imageFilename = filePath.getFileName
+    val filenameStr = imageFilename.toString
+    if (filenameStr.endsWith(".jpg"))
+      resizedImageDir.resolve(filenameStr.substring(0, filenameStr.length - 4) + "." + resizeOutputFormat)
+    else
+      resizedImageDir.resolve(filenameStr + "." + resizeOutputFormat)
   }
 
   private def md5Sink: Sink[ByteString, Future[DigestResult]] = {
