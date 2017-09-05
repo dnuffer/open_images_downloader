@@ -36,6 +36,7 @@ case class Director(rootDir: Path,
                     saveTarBalls: Boolean,
                     downloadMetadata: Boolean,
                     downloadImages: Boolean,
+                    download300K: Boolean,
                     saveOriginalImages: Boolean,
                     resizeImages: Boolean,
                     resizeMode: ResizeMode,
@@ -273,12 +274,14 @@ case class Director(rootDir: Path,
     // server replied with a 200 OK
     case (Success(HttpResponse(StatusCodes.OK, _, entity1, _)), state@ImageProcessingState(DownloadParams(url: String, _, expectedSize: Long, _, _, _), _)) =>
       log.info("{} OK. Content-Type: {}", url, entity1.contentType)
-      val entity = entity1.withSizeLimit(expectedSize)
+      val sizeLimit: Long = if (download300K) Math.max(1200000L, expectedSize) else expectedSize
+      val entity = entity1.withSizeLimit(sizeLimit)
       entity.contentType match {
         case Binary(MediaTypes.`image/jpeg`) =>
           entity.contentLengthOption match {
             case Some(serverSize) =>
-              if (serverSize == expectedSize) {
+              // If we download 300K images, the size is unpredictable because the image is generated on the fly, so don't bother checking it.
+              if (download300K || serverSize == expectedSize) {
                 Future(Success(entity.dataBytes, state))
               } else {
                 log.error("{}: server size ({}) doesn't match expected size ({})!", url, serverSize, expectedSize)
@@ -333,7 +336,8 @@ case class Director(rootDir: Path,
     case Success((IOResult(count, Success(_)), md5DigestResult: DigestResult, state@ImageProcessingState(downloadParams, _))) =>
       val decodedMd5: ByteString = decodeBase64Md5(downloadParams.expectedMd5)
 
-      if (decodedMd5 != md5DigestResult.messageDigest) {
+      // If we download 300K images, the md5 is unpredictable because the image is generated on the fly, so don't bother checking it.
+      if (!download300K && decodedMd5 != md5DigestResult.messageDigest) {
         log.error("{} md5 sum doesn't match expected. actual: {}, expected: {}", downloadParams.url, hexify(md5DigestResult.messageDigest),
           hexify(decodedMd5))
         val deleted = Files.deleteIfExists(downloadParams.filePath)
@@ -401,10 +405,10 @@ case class Director(rootDir: Path,
   private def saveToFileIfNotPresentAndComputeMd5(filePath: Path, needToDownload: Boolean): Sink[ByteString, Future[(IOResult, DigestResult)]] = {
     if (needToDownload && saveOriginalImages) {
       Files.createDirectories(filePath.getParent) // theoretically this should be done during materialization, but somehow that's a race condition with FileIO.toPath() and so causes random failures.
-      broadcastToSinksSingleFuture(FileIO.toPath(filePath), md5Sink)
+      broadcastToSinksSingleFuture(FileIO.toPath(filePath), md5Sink())
     } else {
       val size = try Files.size(filePath) catch { case NonFatal(_) => 0 }
-      md5Sink.mapMaterializedValue(_.map((IOResult(size, Success(Done)), _)))
+      md5Sink().mapMaterializedValue(_.map((IOResult(size, Success(Done)), _)))
     }
   }
 
@@ -421,7 +425,7 @@ case class Director(rootDir: Path,
       resizedImageDir.resolve(filenameStr + "." + resizeOutputFormat)
   }
 
-  private def md5Sink: Sink[ByteString, Future[DigestResult]] = {
+  private def md5Sink(): Sink[ByteString, Future[DigestResult]] = {
     DigestCalculator.sink(Algorithm.MD5)
   }
 
@@ -502,10 +506,15 @@ case class Director(rootDir: Path,
       })
   }
 
-  def makeRequest(line: Map[String, ByteString]) = HttpRequest(uri = line("OriginalURL").utf8String)
+  def makeRequest(line: Map[String, ByteString]) = HttpRequest(uri = getDownloadUrlFromLine(line))
+
+  private def getDownloadUrlFromLine(line: Map[String, ByteString]) = {
+    if (download300K && line("Thumbnail300KURL").nonEmpty) line("Thumbnail300KURL").utf8String
+    else line("OriginalURL").utf8String
+  }
 
   def makeDownloadUrlToFile(line: Map[String, ByteString], outputDir: Path, checkMd5IfExists: Boolean): DownloadParams = {
-    val originalURLStr: String = line("OriginalURL").utf8String
+    val originalURLStr: String = getDownloadUrlFromLine(line)
     val originalURL: Uri = Uri(originalURLStr)
     val fileName = originalURL.path.toString().split('/').last
     val fileDirName = fileName.substring(0, 3) // the first 3 chars will create 1000 dirs with 9000 files in each. That's pretty balanced.

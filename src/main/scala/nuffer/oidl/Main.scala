@@ -28,7 +28,8 @@ object Main extends App {
     val saveTarBalls: ScallopOption[Boolean] = opt[Boolean](default = Some(false), descr = "Save the downloaded .tar.gz and .tar files. This uses more space but can save time when resuming from an interrupted execution.")
     val downloadMetadata: ScallopOption[Boolean] = opt[Boolean](default = Some(false), descr = "Download and extract the metadata files (annotations and classes)")
     val downloadImages: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Download and extract images_2017_07.tar.gz and all images")
-    val saveOriginalImages: ScallopOption[Boolean] = opt[Boolean](default = Some(false), descr = "Save full-size original images. This will use over 10 TB of space.")
+    val download300K: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Download the image from the url in the Thumbnail300KURL field. This disables verifying the md5 hash and results in lower quality images, but may be much faster and use less bandwidth and storage space. These are resized to a max dim of 640, so if you use resizeMode=ShrinkToFit and resizeBoxSize=640 you can get a full consistently sized set of images. Not all images have a 300K url and so the original is downloaded and needs to be resized.")
+    val saveOriginalImages: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Save full-size original images. This will use over 10 TB of space.")
     val resizeImages: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Resize images.")
     val resizeMode: ScallopOption[String] = opt[String](default = Some("ShrinkToFit"), descr = "ShrinkToFit will resize images larger than the specified size of bounding box, preserving aspect ratio. Smaller images are unchanged. FillCrop will fill the bounding box, by first either shrinking or growing the image and then doing a center-crop on the larger dimension. FillDistort will fill the bounding box, by either shrinking or growing the image, modifying the aspect ratio as necessary to fit.", validate = (opt) => opt == "ShrinkToFit" || opt == "FillCrop" || opt == "FillDistort")
     val resizeBoxSize: ScallopOption[Int] = opt[Int](default = Some(224), descr = "The number of pixels used by resizing for the side of the bounding box")
@@ -103,6 +104,7 @@ object Main extends App {
     conf.saveTarBalls(),
     conf.downloadMetadata(),
     conf.downloadImages(),
+    conf.download300K(),
     conf.saveOriginalImages(),
     conf.resizeImages(),
     ResizeMode.withName(conf.resizeMode()),
