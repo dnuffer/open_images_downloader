@@ -1,6 +1,6 @@
 package nuffer.oidl
 
-import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
+import java.io.ByteArrayInputStream
 import java.nio.file.{Files, Paths}
 import javax.imageio.ImageIO
 
@@ -9,16 +9,10 @@ import akka.stream.alpakka.file.scaladsl.Directory
 import akka.stream.scaladsl.{Sink, Source}
 import akka.stream.testkit.StreamSpec
 import akka.util.ByteString
-import org.im4java.core.{ConvertCmd, IMOperation}
-import org.im4java.process.Pipe
-
-import scala.concurrent.{ExecutionContext, ExecutionContextExecutor}
-//import magick.{ImageInfo, MagickImage}
-//import org.libjpegturbo.turbojpeg.{TJCompressor, TJDecompressor}
 
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.{Duration, FiniteDuration, _}
-import scala.concurrent.{Await, Future}
+import scala.concurrent.{Await, ExecutionContext, ExecutionContextExecutor, Future}
 import scala.language.postfixOps
 import scala.util.{Failure, Success}
 
@@ -102,27 +96,27 @@ class ImageResizeTest extends StreamSpec {
       }
     }
 
-    "im4java" in {
-      time("im4java resize") {
-        val convertCmd = new ConvertCmd()
-        val op = new IMOperation()
-        op.addImage("-"); // read from stdin
-        op.addImage("jpg:-"); // write to stdout in jpeg-format
-        op.define("jpeg:size=598x598")
-        op.autoOrient()
-        op.thumbnail(299, 299, '>')
-        for (imageBytes <- imagesBytes) {
-          println("starting new image")
-          val is = new ByteArrayInputStream(imageBytes)
-          val os = new ByteArrayOutputStream(4092)
-          val pipeIn = new Pipe(is, null)
-          val pipeOut = new Pipe(null, os)
-          convertCmd.setInputProvider(pipeIn)
-          convertCmd.setOutputConsumer(pipeOut)
-          convertCmd.run(op)
-        }
-      }
-    }
+    //    "im4java" in {
+    //      time("im4java resize") {
+    //        val convertCmd = new ConvertCmd()
+    //        val op = new IMOperation()
+    //        op.addImage("-"); // read from stdin
+    //        op.addImage("jpg:-"); // write to stdout in jpeg-format
+    //        op.define("jpeg:size=598x598")
+    //        op.autoOrient()
+    //        op.thumbnail(299, 299, '>')
+    //        for (imageBytes <- imagesBytes) {
+    //          println("starting new image")
+    //          val is = new ByteArrayInputStream(imageBytes)
+    //          val os = new ByteArrayOutputStream(4092)
+    //          val pipeIn = new Pipe(is, null)
+    //          val pipeOut = new Pipe(null, os)
+    //          convertCmd.setInputProvider(pipeIn)
+    //          convertCmd.setOutputConsumer(pipeOut)
+    //          convertCmd.run(op)
+    //        }
+    //      }
+    //    }
 
     "scala process convert" in {
       time("convert resize") {

@@ -2,7 +2,6 @@
 
 TODO:
 * output progress messages to console
-* Use sbt-native-packager to create release files https://github.com/sbt/sbt-native-packager
 
 * UI
     * Show last 100(?) successful downloads
