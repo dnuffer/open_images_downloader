@@ -19,7 +19,7 @@ import scala.collection.JavaConverters._
 object Main extends App {
 
   class Conf(arguments: Seq[String]) extends ScallopConf(arguments) {
-    val rootDir: ScallopOption[String] = opt[String](default = Some("/tmp/oidl"), descr = "top-level directory for storing the Open Images dataset")
+    val rootDir: ScallopOption[String] = opt[String](default = Some("."), descr = "top-level directory for storing the Open Images dataset")
     //    val originalImagesDir: ScallopOption[String] = opt[String](descr = "If specified, the downloaded original images will be stored in this directory. Otherwise they are placed in <open images dir>/2017_07/{train,validation,test}/images-original")
     val checkMd5IfExists: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "If an image already exists locally in <image dir> and is the same size as the original, check the md5 sum of the file to determine whether to download it.")
     val alwaysDownload: ScallopOption[Boolean] = toggle(default = Some(false), descrYes = "Download and process all images even if the file already exists in <image dir>. This is intended for testing. The check-md5-if-exists option should be sufficient if local data corruption is suspected.")
