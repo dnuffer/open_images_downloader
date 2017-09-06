@@ -21,6 +21,7 @@ object Main extends App {
   class Conf(arguments: Seq[String]) extends ScallopConf(arguments) {
     val rootDir: ScallopOption[String] = opt[String](default = Some("."), descr = "top-level directory for storing the Open Images dataset")
     //    val originalImagesDir: ScallopOption[String] = opt[String](descr = "If specified, the downloaded original images will be stored in this directory. Otherwise they are placed in <open images dir>/2017_07/{train,validation,test}/images-original")
+    val originalImagesSubdirectory: ScallopOption[String] = opt[String](default = Some("images-original"), descr = "name of the subdirectory where the original images are stored.")
     val checkMd5IfExists: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "If an image already exists locally in <image dir> and is the same size as the original, check the md5 sum of the file to determine whether to download it.")
     val alwaysDownload: ScallopOption[Boolean] = toggle(default = Some(false), descrYes = "Download and process all images even if the file already exists in <image dir>. This is intended for testing. The check-md5-if-exists option should be sufficient if local data corruption is suspected.")
     val maxRetries: ScallopOption[Int] = opt[Int](default = Some(15), descr = "Number of times to retry failed downloads", validate = 0 <)
@@ -32,6 +33,7 @@ object Main extends App {
     val download300K: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Download the image from the url in the Thumbnail300KURL field. This disables verifying the md5 hash and results in lower quality images, but may be much faster and use less bandwidth and storage space. These are resized to a max dim of 640, so if you use resizeMode=ShrinkToFit and resizeBoxSize=640 you can get a full consistently sized set of images. Not all images have a 300K url and so the original is downloaded and needs to be resized.")
     val saveOriginalImages: ScallopOption[Boolean] = opt[Boolean](default = Some(false), descr = "Save full-size original images. This will use over 10 TB of space.")
     val resizeImages: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Resize images.")
+    val resizedImagesSubdirectory: ScallopOption[String] = opt[String](default = Some("images-resized"), descr = "name of the subdirectory where the resized images are stored.")
     val resizeMode: ScallopOption[String] = opt[String](default = Some("ShrinkToFit"), descr = "ShrinkToFit will resize images larger than the specified size of bounding box, preserving aspect ratio. Smaller images are unchanged. FillCrop will fill the bounding box, by first either shrinking or growing the image and then doing a center-crop on the larger dimension. FillDistort will fill the bounding box, by either shrinking or growing the image, modifying the aspect ratio as necessary to fit.", validate = (opt) => opt == "ShrinkToFit" || opt == "FillCrop" || opt == "FillDistort")
     val resizeBoxSize: ScallopOption[Int] = opt[Int](default = Some(224), descr = "The number of pixels used by resizing for the side of the bounding box")
     val resizeOutputFormat: ScallopOption[String] = opt[String](default = Some("jpg"), descr = "The format (and extension) to use for the resized images. Valid values are those supported by ImageMagick. See https://www.imagemagick.org/script/formats.php and/or run identify -list format")
@@ -110,6 +112,7 @@ object Main extends App {
 
   val director = Director(
     Paths.get(conf.rootDir.getOrElse(".")),
+    conf.originalImagesSubdirectory(),
     conf.checkMd5IfExists(),
     conf.alwaysDownload(),
     conf.saveTarBalls(),
@@ -118,6 +121,7 @@ object Main extends App {
     conf.download300K(),
     conf.saveOriginalImages(),
     conf.resizeImages(),
+    conf.resizedImagesSubdirectory(),
     ResizeMode.withName(conf.resizeMode()),
     conf.resizeBoxSize(),
     conf.resizeOutputFormat(),

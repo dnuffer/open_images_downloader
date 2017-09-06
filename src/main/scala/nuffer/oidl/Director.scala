@@ -31,6 +31,7 @@ case class DownloadParams(url: String, filePath: Path, expectedSize: Long, expec
 case class ImageProcessingState(downloadParams: DownloadParams, needToDownload: Boolean)
 
 case class Director(rootDir: Path,
+                    originalImagesSubdirectory: String,
                     checkMd5IfExists: Boolean,
                     alwaysDownload: Boolean,
                     saveTarBalls: Boolean,
@@ -39,6 +40,7 @@ case class Director(rootDir: Path,
                     download300K: Boolean,
                     saveOriginalImages: Boolean,
                     resizeImages: Boolean,
+                    resizedImagesSubdirectory: String,
                     resizeMode: ResizeMode,
                     resizeBoxSize: Int,
                     resizeOutputFormat: String,
@@ -414,7 +416,7 @@ case class Director(rootDir: Path,
 
   private def resizedImagePath(filePath: Path): Path = {
     val subsetDir = filePath.getParent.getParent
-    val resizedDir = subsetDir.resolveSibling("images-resized")
+    val resizedDir = subsetDir.resolveSibling(resizedImagesSubdirectory)
     val threeCharPrefix = filePath.getParent.getFileName
     val resizedImageDir = resizedDir.resolve(threeCharPrefix)
     val imageFilename = filePath.getFileName
@@ -523,7 +525,7 @@ case class Director(rootDir: Path,
       line("OriginalMD5").utf8String, checkMd5IfExists, line)
   }
 
-  def outputDir(line: Map[String, ByteString]): java.nio.file.Path = Paths.get("2017_07", line("Subset").utf8String, "images-original")
+  def outputDir(line: Map[String, ByteString]): java.nio.file.Path = Paths.get("2017_07", line("Subset").utf8String, originalImagesSubdirectory)
 
   private def needToDownload(downloadUrlToFile: DownloadParams, alwaysDownload: Boolean): Future[Boolean] = {
     if (alwaysDownload) {

@@ -1,6 +1,8 @@
 # Open Images dataset downloader
 
 TODO:
+* option to specify resized images sub-directory name
+* option to control how many parallel connections are made (mirror akka http)
 
 * UI
     * Show last 100(?) successful downloads
@@ -16,7 +18,6 @@ TODO:
 * optionally discard png
 * optionally validate the image is a proper jpeg
 * option to specify original images directory
-* option to specify resized images directory
 * option to enable/disable 3-letter image subdirs
 * option to do multiple image processes - resize to multiple sizes, multiple resize modes, convert to other formats.
 
