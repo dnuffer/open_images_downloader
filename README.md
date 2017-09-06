@@ -5,6 +5,9 @@ TODO:
 * option to control how many parallel connections are made (mirror akka http)
 
 * UI
+    * Show # of images/sec
+    * Show # of bytes/sec read from internet
+    * Show # of bytes/sec written to disk
     * Show last 100(?) successful downloads
     * Show last 100(?) failed downloads
     * Show downloads in progress w/percentage complete

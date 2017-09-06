@@ -15,8 +15,10 @@ import com.typesafe.config.{ConfigFactory, ConfigValueFactory}
 import org.rogach.scallop.{ScallopConf, ScallopOption}
 
 import scala.collection.JavaConverters._
+import scala.language.postfixOps
 
 object Main extends App {
+  def isPowerOfTwo(x: Int) = (x & (x - 1)) == 0
 
   class Conf(arguments: Seq[String]) extends ScallopConf(arguments) {
     val rootDir: ScallopOption[String] = opt[String](default = Some("."), descr = "top-level directory for storing the Open Images dataset")
@@ -24,6 +26,11 @@ object Main extends App {
     val originalImagesSubdirectory: ScallopOption[String] = opt[String](default = Some("images-original"), descr = "name of the subdirectory where the original images are stored.")
     val checkMd5IfExists: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "If an image already exists locally in <image dir> and is the same size as the original, check the md5 sum of the file to determine whether to download it.")
     val alwaysDownload: ScallopOption[Boolean] = toggle(default = Some(false), descrYes = "Download and process all images even if the file already exists in <image dir>. This is intended for testing. The check-md5-if-exists option should be sufficient if local data corruption is suspected.")
+    val maxHostConnections: ScallopOption[Int] = opt[Int](default = Some(5), descr = "The maximum number of parallel connections to a single host.", validate = 0 <)
+    // openimages has 16 hostnames in the flickr urls. ($ csvcut -c OriginalURL /tmp/oidl/2017_07/train/images.csv | tail -n+2 | cut -d / -f 3 | sort | uniq | wc -l)
+    // so it may be useful to make this 128? Maybe that's a bit excessive?
+    val maxTotalConnections: ScallopOption[Int] = opt[Int](default = Some(128), descr = "The maximum number of parallel connections to all hosts. Must be a power of 2 and > 0", validate = x => 0 < x && isPowerOfTwo(x))
+    val httpPipeliningLimit: ScallopOption[Int] = opt[Int](default = Some(4), descr = "The maximum number of parallel pipelined http requests per connection.")
     val maxRetries: ScallopOption[Int] = opt[Int](default = Some(15), descr = "Number of times to retry failed downloads", validate = 0 <)
     val logFile: ScallopOption[String] = opt[String](default = None, descr = "Write a log to <file>.")
     val logToStdout: ScallopOption[Boolean] = opt[Boolean](default = Some(true), descr = "Whether to write the log to stdout.")
@@ -88,20 +95,19 @@ object Main extends App {
   }
 
   val mainConfig = ConfigFactory.load()
-    .withValue("akka.http.host-connection-pool.max-retries", ConfigValueFactory.fromAnyRef(conf.maxRetries()))
-    .withValue("akka.http.host-connection-pool.idle-timeout", ConfigValueFactory.fromAnyRef("infinite"))
+    .withValue("akka.http.client.connecting-timeout", ConfigValueFactory.fromAnyRef("1 min"))
     .withValue("akka.http.client.idle-timeout", ConfigValueFactory.fromAnyRef("infinite"))
+    .withValue("akka.http.host-connection-pool.max-connections", ConfigValueFactory.fromAnyRef(conf.maxHostConnections()))
+    .withValue("akka.http.host-connection-pool.max-retries", ConfigValueFactory.fromAnyRef(conf.maxRetries()))
+    .withValue("akka.http.host-connection-pool.max-open-requests", ConfigValueFactory.fromAnyRef(conf.maxTotalConnections()))
+    .withValue("akka.http.host-connection-pool.pipelining-limit", ConfigValueFactory.fromAnyRef(1))
+    .withValue("akka.http.host-connection-pool.idle-timeout", ConfigValueFactory.fromAnyRef("infinite"))
+    .withValue("akka.http.host-connection-pool.client.connecting-timeout", ConfigValueFactory.fromAnyRef("1 min"))
     .withValue("akka.http.host-connection-pool.client.idle-timeout", ConfigValueFactory.fromAnyRef("infinite"))
-    .withValue("akka.stream.default-blocking-io-dispatcher.thread-pool-executor.fixed-pool-size", ConfigValueFactory.fromAnyRef("128"))
-    .withValue("akka.actor.default-dispatcher.fork-join-executor.parallelism-factor", ConfigValueFactory.fromAnyRef("4.0"))
     .withValue("akka.stdout-loglevel", ConfigValueFactory.fromAnyRef("ERROR"))
     .withValue("akka.loggers", ConfigValueFactory.fromIterable(List("akka.event.slf4j.Slf4jLogger").asJava))
     .withValue("akka.loglevel", ConfigValueFactory.fromAnyRef("INFO"))
     .withValue("akka.logging-filter", ConfigValueFactory.fromAnyRef("akka.event.slf4j.Slf4jLoggingFilter"))
-
-  //    .withValue("akka.http.host-connection-pool.max-connections", ConfigValueFactory.fromAnyRef(1))
-  //    .withValue("akka.http.host-connection-pool.idle-timeout", ConfigValueFactory.fromAnyRef("1 s"))
-  //    .withValue("akka.http.host-connection-pool.client.idle-timeout", ConfigValueFactory.fromAnyRef("1ms"))
 
 
   implicit val system = ActorSystem("oidl", mainConfig)
