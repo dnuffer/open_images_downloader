@@ -26,3 +26,4 @@ libraryDependencies += "ch.qos.logback" % "logback-classic" % "1.2.3"
 
 
 enablePlugins(JavaAppPackaging)
+mappings in Universal += file("README.md") -> "README.md"
