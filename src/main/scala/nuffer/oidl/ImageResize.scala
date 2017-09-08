@@ -35,20 +35,20 @@ object ImageResize {
   // and quality is TwelveMonkeys (for loading/saving) + imgscalr (for resize), which is much slower than imagemagick.
   // So after all that research, we're using imagemagick convert via command line.
 
-  private def qualityParameters(compressionQuality: Option[Int]) = compressionQuality match {
+  private def qualityParameters(compressionQuality: Option[Long]) = compressionQuality match {
     case None => " "
     case Some(value) => " -quality " + value
   }
 
-  def resizeShrinkToFitJpegFlow(maxDim: Int, outputFormat: String, compressionQuality: Option[Int])(implicit materializer: Materializer): Flow[ByteString, ByteString, Future[Done]] =
+  def resizeShrinkToFitJpegFlow(maxDim: Long, outputFormat: String, compressionQuality: Option[Long])(implicit materializer: Materializer): Flow[ByteString, ByteString, Future[Done]] =
     ProcessPipe.throughProcessCheckForError(
       s"convert -define jpeg:size=${maxDim * 2}x${maxDim * 2} - -auto-orient -thumbnail ${maxDim}x${maxDim}> ${qualityParameters(compressionQuality)} ${outputFormat}:-")
 
-  def resizeFillCropJpegFlow(maxDim: Int, outputFormat: String, compressionQuality: Option[Int])(implicit materializer: Materializer): Flow[ByteString, ByteString, Future[Done]] =
+  def resizeFillCropJpegFlow(maxDim: Long, outputFormat: String, compressionQuality: Option[Long])(implicit materializer: Materializer): Flow[ByteString, ByteString, Future[Done]] =
     ProcessPipe.throughProcessCheckForError(
       s"convert -define jpeg:size=${maxDim * 2}x${maxDim * 2} - -auto-orient -thumbnail ${maxDim}x${maxDim}^ -gravity center -extent ${maxDim}x${maxDim} ${qualityParameters(compressionQuality)} ${outputFormat}:-")
 
-  def resizeFillDistortJpegFlow(maxDim: Int, outputFormat: String, compressionQuality: Option[Int])(implicit materializer: Materializer): Flow[ByteString, ByteString, Future[Done]] =
+  def resizeFillDistortJpegFlow(maxDim: Long, outputFormat: String, compressionQuality: Option[Long])(implicit materializer: Materializer): Flow[ByteString, ByteString, Future[Done]] =
     ProcessPipe.throughProcessCheckForError(
       s"convert -define jpeg:size=${maxDim * 2}x${maxDim * 2} - -auto-orient -thumbnail ${maxDim}x${maxDim}! ${qualityParameters(compressionQuality)} ${outputFormat}:-")
 }

@@ -42,9 +42,9 @@ case class Director(rootDir: Path,
                     resizeImages: Boolean,
                     resizedImagesSubdirectory: String,
                     resizeMode: ResizeMode,
-                    resizeBoxSize: Int,
+                    resizeBoxSize: Long,
                     resizeOutputFormat: String,
-                    resizeCompressionQuality: Option[Int])(implicit system: ActorSystem) {
+                    resizeCompressionQuality: Option[Long])(implicit system: ActorSystem) {
   val log = Logging(system, this.getClass)
   final implicit val ec: ExecutionContext = ExecutionContext.fromExecutorService(java.util.concurrent.Executors.newCachedThreadPool())
   final implicit val materializer: ActorMaterializer = ActorMaterializer()

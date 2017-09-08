@@ -18,33 +18,33 @@ import scala.collection.JavaConverters._
 import scala.language.postfixOps
 
 object Main extends App {
-  def isPowerOfTwo(x: Int) = (x & (x - 1)) == 0
+  def isPowerOfTwo(x: Long) = (x & (x - 1)) == 0
 
   class Conf(arguments: Seq[String]) extends ScallopConf(arguments) {
     val rootDir: ScallopOption[String] = opt[String](default = Some("."), descr = "top-level directory for storing the Open Images dataset")
     //    val originalImagesDir: ScallopOption[String] = opt[String](descr = "If specified, the downloaded original images will be stored in this directory. Otherwise they are placed in <open images dir>/2017_07/{train,validation,test}/images-original")
     val originalImagesSubdirectory: ScallopOption[String] = opt[String](default = Some("images-original"), descr = "name of the subdirectory where the original images are stored.")
     val checkMd5IfExists: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "If an image already exists locally in <image dir> and is the same size as the original, check the md5 sum of the file to determine whether to download it.")
-    val alwaysDownload: ScallopOption[Boolean] = toggle(default = Some(false), descrYes = "Download and process all images even if the file already exists in <image dir>. This is intended for testing. The check-md5-if-exists option should be sufficient if local data corruption is suspected.")
-    val maxHostConnections: ScallopOption[Int] = opt[Int](default = Some(5), descr = "The maximum number of parallel connections to a single host.", validate = 0 <)
+    val alwaysDownload: ScallopOption[Boolean] = toggle(default = Some(false), descrYes = "Download and process all images even if the file already exists in <image dir>. This is intended for testing. The check-md5-if-exists option should be sufficient if local data corruption is suspected.", hidden = true)
+    val maxHostConnections: ScallopOption[Long] = number(default = Some(5), descr = "The maximum number of parallel connections to a single host.", validate = 0 <)
     // openimages has 16 hostnames in the flickr urls. ($ csvcut -c OriginalURL /tmp/oidl/2017_07/train/images.csv | tail -n+2 | cut -d / -f 3 | sort | uniq | wc -l)
     // so it may be useful to make this 128? Maybe that's a bit excessive?
-    val maxTotalConnections: ScallopOption[Int] = opt[Int](default = Some(128), descr = "The maximum number of parallel connections to all hosts. Must be a power of 2 and > 0", validate = x => 0 < x && isPowerOfTwo(x))
-    val httpPipeliningLimit: ScallopOption[Int] = opt[Int](default = Some(4), descr = "The maximum number of parallel pipelined http requests per connection.")
-    val maxRetries: ScallopOption[Int] = opt[Int](default = Some(15), descr = "Number of times to retry failed downloads", validate = 0 <)
+    val maxTotalConnections: ScallopOption[Long] = number(default = Some(128), descr = "The maximum number of parallel connections to all hosts. Must be a power of 2 and > 0", validate = x => 0 < x && isPowerOfTwo(x))
+    val httpPipeliningLimit: ScallopOption[Long] = number(default = Some(4), descr = "The maximum number of parallel pipelined http requests per connection.")
+    val maxRetries: ScallopOption[Long] = number(default = Some(15), descr = "Number of times to retry failed downloads", validate = 0 <)
     val logFile: ScallopOption[String] = opt[String](default = None, descr = "Write a log to <file>.")
     val logToStdout: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "Write the log to stdout.")
     val saveTarBalls: ScallopOption[Boolean] = toggle(default = Some(false), descrYes = "Save the downloaded .tar.gz and .tar files. This uses more space but can save time when resuming from an interrupted execution.")
     val downloadMetadata: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "Download and extract the metadata files (annotations and classes)")
     val downloadImages: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "Download and extract images_2017_07.tar.gz and all images")
-    val download300K: ScallopOption[Boolean] = toggle(default = Some(false), descrYes = "Download the image from the url in the Thumbnail300KURL field. This disables verifying the md5 hash and results in lower quality images, but may be much faster and use less bandwidth and storage space. These are resized to a max dim of 640, so if you use resizeMode=ShrinkToFit and resizeBoxSize=640 you can get a full consistently sized set of images. Not all images have a 300K url and so the original is downloaded and needs to be resized.")
+    val download300K: ScallopOption[Boolean] = toggle(name = "download-300k", default = Some(false), descrYes = "Download the image from the url in the Thumbnail300KURL field. This disables verifying the md5 hash and results in lower quality images, but may be much faster and use less bandwidth and storage space. These are resized to a max dim of 640, so if you use resizeMode=ShrinkToFit and resizeBoxSize=640 you can get a full consistently sized set of images. Not all images have a 300K url and so the original is downloaded and needs to be resized.")
     val saveOriginalImages: ScallopOption[Boolean] = toggle(default = Some(false), descrYes = "Save full-size original images. This will use over 10 TB of space.")
     val resizeImages: ScallopOption[Boolean] = toggle(default = Some(true), descrYes = "Resize images.")
     val resizedImagesSubdirectory: ScallopOption[String] = opt[String](default = Some("images-resized"), descr = "name of the subdirectory where the resized images are stored.")
     val resizeMode: ScallopOption[String] = opt[String](default = Some("ShrinkToFit"), descr = "ShrinkToFit will resize images larger than the specified size of bounding box, preserving aspect ratio. Smaller images are unchanged. FillCrop will fill the bounding box, by first either shrinking or growing the image and then doing a center-crop on the larger dimension. FillDistort will fill the bounding box, by either shrinking or growing the image, modifying the aspect ratio as necessary to fit.", validate = (opt) => opt == "ShrinkToFit" || opt == "FillCrop" || opt == "FillDistort")
-    val resizeBoxSize: ScallopOption[Int] = opt[Int](default = Some(224), descr = "The number of pixels used by resizing for the side of the bounding box")
+    val resizeBoxSize: ScallopOption[Long] = number(default = Some(224), descr = "The number of pixels used by resizing for the side of the bounding box")
     val resizeOutputFormat: ScallopOption[String] = opt[String](default = Some("jpg"), descr = "The format (and extension) to use for the resized images. Valid values are those supported by ImageMagick. See https://www.imagemagick.org/script/formats.php and/or run identify -list format")
-    val resizeCompressionQuality: ScallopOption[Int] = opt[Int](default = None, descr = "The compression quality. If specified, it will be passed with the -quality option to imagemagick convert. See https://www.imagemagick.org/script/command-line-options.php#quality for the meaning of different values and defaults for various output formats. If unspecified, -quality will not be passed and imagemagick will use its default.")
+    val resizeCompressionQuality: ScallopOption[Long] = number(default = None, descr = "The compression quality. If specified, it will be passed with the -quality option to imagemagick convert. See https://www.imagemagick.org/script/command-line-options.php#quality for the meaning of different values and defaults for various output formats. If unspecified, -quality will not be passed and imagemagick will use its default.")
     verify()
   }
 
