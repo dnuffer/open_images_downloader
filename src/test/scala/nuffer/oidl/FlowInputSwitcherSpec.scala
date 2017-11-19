@@ -28,7 +28,7 @@ class FlowInputSwitcherSpec extends StreamSpec {
 
       val rg: RunnableGraph[SinkQueueWithCancel[ByteString]] = s.toMat(out)(Keep.right)
       val queue: SinkQueueWithCancel[ByteString] = rg.run()
-      Await.result(queue.pull(), 3 seconds) should be(ByteString(0))
+      Await.result(queue.pull(), 3 seconds) should be(Some(ByteString(0)))
       Await.result(queue.pull(), 3 seconds) should be(None)
     }
 
@@ -43,7 +43,7 @@ class FlowInputSwitcherSpec extends StreamSpec {
 
       val rg: RunnableGraph[SinkQueueWithCancel[ByteString]] = s.toMat(out)(Keep.right)
       val queue: SinkQueueWithCancel[ByteString] = rg.run()
-      Await.result(queue.pull(), 3 seconds) should be(ByteString(1))
+      Await.result(queue.pull(), 3 seconds) should be(Some(ByteString(0)))
       Await.result(queue.pull(), 3 seconds) should be(None)
 
     }
