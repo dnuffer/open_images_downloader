@@ -21,7 +21,7 @@ object Main extends App {
   def isPowerOfTwo(x: Long) = (x & (x - 1)) == 0
 
   class Conf(arguments: Seq[String]) extends ScallopConf(arguments) {
-    version("open_images_downloader 1.0 by Dan Nuffer")
+    version("open_images_downloader 3.0 by Dan Nuffer")
     banner(
       """Usage: open_images_downloader[.bat] [OPTION]...
         |
@@ -55,7 +55,7 @@ object Main extends App {
     val downloadMetadata: ScallopOption[Boolean] = toggle(default = Some(true), noshort = true,
       descrYes = "Download and extract the metadata files (annotations and classes). Default is on")
     val downloadImages: ScallopOption[Boolean] = toggle(default = Some(true), noshort = true,
-      descrYes = "Download and extract images_2017_07.tar.gz and all images. Default is on")
+      descrYes = "Download and extract the version's image csv file (e.g. images_2017_11.tar.gz) and all images. Default is on")
     val download300K: ScallopOption[Boolean] = toggle(name = "download-300k", default = Some(false), noshort = true,
       descrYes = "Download the image from the url in the Thumbnail300KURL field. This disables verifying the size and md5 hash and results in lower quality images, but may be much faster and use less bandwidth and storage space. These are resized to a max dim of 640, so if you use --resize-mode=ShrinkToFit and --resize-box-size=640 you can get a full consistently sized set of images. For the few images that don't have a 300K url the original is downloaded and needs to be resized. Default is off")
     val saveOriginalImages: ScallopOption[Boolean] = toggle(default = Some(false), noshort = true,
@@ -72,6 +72,8 @@ object Main extends App {
       descr = "The format (and extension) to use for the resized images. Valid values are those supported by ImageMagick. See https://www.imagemagick.org/script/formats.php and/or run identify -list format. Default is jpg")
     val resizeCompressionQuality: ScallopOption[Long] = opt[Long](default = None, noshort = true,
       descr = "The compression quality. If specified, it will be passed with the -quality option to imagemagick convert. See https://www.imagemagick.org/script/command-line-options.php#quality for the meaning of different values and defaults for various output formats. If unspecified, -quality will not be passed and imagemagick will use its default")
+    val datasetVersion: ScallopOption[Long] = opt[Long](default = Some(3), noshort = true,
+      descr = "The version of the dataset to download. 1, 2, or 3. 3 was released 2017-11-16, 2 was released 2017-07-20, and 1 was released 2016-09-28. Default is 3.")
     verify()
   }
 
@@ -158,7 +160,8 @@ object Main extends App {
     ResizeMode.withName(conf.resizeMode()),
     conf.resizeBoxSize(),
     conf.resizeOutputFormat(),
-    conf.resizeCompressionQuality.toOption)
+    conf.resizeCompressionQuality.toOption,
+    conf.datasetVersion())
 
   director.run().onComplete({
     _ =>

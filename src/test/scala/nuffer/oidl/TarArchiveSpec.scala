@@ -45,7 +45,7 @@ class TarArchiveSpec extends StreamSpec {
         if (order.first) {
           println(s"Got first record for ${tarArchiveEntry.getName}")
           val path = Paths.get(tarArchiveEntry.getName)
-          Files.createDirectories(path.getParent)
+          if (path.getParent() != null) Files.createDirectories(path.getParent)
           chan = Some(Files.newByteChannel(path, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE))
         }
         try {

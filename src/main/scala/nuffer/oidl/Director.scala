@@ -44,16 +44,22 @@ case class Director(rootDir: Path,
                     resizeMode: ResizeMode,
                     resizeBoxSize: Long,
                     resizeOutputFormat: String,
-                    resizeCompressionQuality: Option[Long])(implicit system: ActorSystem) {
+                    resizeCompressionQuality: Option[Long],
+                    dataVersion: Long)(implicit system: ActorSystem) {
   val log = Logging(system, this.getClass)
   final implicit val ec: ExecutionContext = ExecutionContext.fromExecutorService(java.util.concurrent.Executors.newCachedThreadPool())
   final implicit val materializer: ActorMaterializer = ActorMaterializer()
+  val datasetMetadata: DatasetMetadata = dataVersion match {
+    case 1 => DatasetMetadata.openImagesV1DatasetMetadata
+    case 2 => DatasetMetadata.openImagesV2DatasetMetadata
+    case 3 => DatasetMetadata.openImagesV3DatasetMetadata
+  }
 
   def run(): Future[Done] = {
 
     val otherFilesFuture: Future[Done] = if (downloadMetadata) {
       Future.sequence(
-        DatasetMetadata.openImagesV2DatasetMetadata.otherFiles
+        datasetMetadata.otherFiles
           .map(downloadAndExtractMetadataFile)
       ).map(_ => Done)
     } else {
@@ -85,6 +91,7 @@ case class Director(rootDir: Path,
           case (seq: immutable.Seq[(TarArchiveEntry, ByteString)], source: Source[(TarArchiveEntry, ByteString), NotUsed]) =>
             (seq.head, Source.combine(Source(seq), source)(Concat(_)))
         }
+        .filter({ case ((tae: TarArchiveEntry, _: ByteString), _: Source[(TarArchiveEntry, ByteString), NotUsed]) => tae.isFile })
         .map {
           case ((tae: TarArchiveEntry, _: ByteString), source: Source[(TarArchiveEntry, ByteString), NotUsed]) =>
             source
@@ -98,23 +105,23 @@ case class Director(rootDir: Path,
           //            .map(_.updated(csvFilenameKey, ByteString(tarEntry.getName)))
         ).concatSubstreams
 
-    metadataFileSource(DatasetMetadata.openImagesV2DatasetMetadata.imagesFile)
+    metadataFileSource(datasetMetadata.imagesFile)
       .log("images http source").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel, onElement = Logging.InfoLevel))
       .withAttributes(ActorAttributes.supervisionStrategy(_ => Supervision.Stop))
-      .via(metadataFileCacheFlow(DatasetMetadata.openImagesV2DatasetMetadata.imagesFile.tarGzFile))
+      .via(metadataFileCacheFlow(datasetMetadata.imagesFile.tarGzFile))
       .log("images.tar.gz cache").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel))
       .via(Compression.gunzip())
-      .via(metadataFileCacheFlow(DatasetMetadata.openImagesV2DatasetMetadata.imagesFile.tarFile))
+      .via(metadataFileCacheFlow(datasetMetadata.imagesFile.tarFile))
       .log("images.tar cache").withAttributes(Attributes.logLevels(onFinish = Logging.InfoLevel))
       .via(csvLineFlow)
-//      .take(100) // for testing purposes, limit to 100
+//            .take(100) // for testing purposes, limit to 100
       .alsoTo(countAndPrintNumberOfLinesPerType)
       .map(makeDownloadRequestTuple(checkMd5IfExists, _))
       .via(mapNeedToDownloadRequest(alwaysDownload))
       .via(startDownloadOrFromFile)
       .mapAsyncUnordered(100 /* TODO: make this the same size as the number of http streams */)(processJpegBytes)
       .via(Flow.fromFunction(processMd5Result))
-      .alsoTo(Sink.foreach(writeResultToCsv))
+      .alsoTo(Sink.foreach(writeResultToCsv(datasetMetadata.topDir)))
       .watchTermination()(makeTerminationHandler)
       .runWith(Sink.ignore)
   }
@@ -131,7 +138,10 @@ case class Director(rootDir: Path,
         if (order.first) {
           log.info(s"Got first record for ${tarArchiveEntry.getName}. Size: ${tarArchiveEntry.getSize}")
           val path = rootDir.resolve(Paths.get(tarArchiveEntry.getName))
-          chan = if (!fileHasSize(path, tarArchiveEntry.getSize)) {
+          if (tarArchiveEntry.isDirectory) {
+            Files.createDirectories(path)
+          }
+          chan = if (tarArchiveEntry.isFile && !fileHasSize(path, tarArchiveEntry.getSize)) {
             Files.createDirectories(path.getParent)
             bytesWritten = 0
             Some(Files.newByteChannel(path, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE))
@@ -139,19 +149,33 @@ case class Director(rootDir: Path,
             None
           }
         }
+
         try {
           chan.foreach(_.write(bytes.toByteBuffer))
           bytesWritten += bytes.length
           if (order.last) {
             chan.foreach(_.close())
             chan = None
-            List(IOResult(bytesWritten, Success(Done)))
+            val copyOfBytesWritten = bytesWritten
+            bytesWritten = 0
+            if (copyOfBytesWritten != tarArchiveEntry.getSize) {
+              val message = s"expected ${tarArchiveEntry.getSize} bytes, got $copyOfBytesWritten"
+              List(IOResult(copyOfBytesWritten, Failure(TarFileEntryIncorrectSizeException(message))))
+            } else {
+              List(IOResult(copyOfBytesWritten, Success(Done)))
+            }
           } else {
             List()
           }
         }
         catch {
-          case NonFatal(exception) => List(IOResult(bytesWritten, Failure(exception)))
+          case NonFatal(exception) => {
+            chan.foreach(_.close())
+            chan = None
+            val copyOfBytesWritten = bytesWritten
+            bytesWritten = 0
+            List(IOResult(copyOfBytesWritten, Failure(exception)))
+          }
         }
     }
   }
@@ -196,14 +220,14 @@ case class Director(rootDir: Path,
     '"' + line.replace("\"", "\"\"") + '"'
   }
 
-  private def writeResultToCsv: Try[ImageProcessingState] => Unit = {
+  private def writeResultToCsv(datasetTopDir: String): Try[ImageProcessingState] => Unit = {
     case Success(state) =>
-      Files.write(rootDir.resolve("2017_07").resolve(state.downloadParams.csvLine("Subset").utf8String).resolve(imagesSuccessCsvFilename),
+      Files.write(rootDir.resolve(datasetTopDir).resolve(state.downloadParams.csvLine("Subset").utf8String).resolve(imagesSuccessCsvFilename),
         csvHeaderArray.map(columnName => quoteAuthorAndTitle(state.downloadParams.csvLine(columnName).utf8String, columnName)).mkString("", ",", "\n").getBytes(StandardCharsets.UTF_8),
         StandardOpenOption.APPEND, StandardOpenOption.WRITE)
     case Failure(exception: ImageProcessingException) =>
       val csvLine = exception.state.downloadParams.csvLine.updated("FailureDetails", ByteString(quote(exception.getMessage)))
-      Files.write(rootDir.resolve("2017_07").resolve(csvLine("Subset").utf8String).resolve(imagesFailureCsvFilename),
+      Files.write(rootDir.resolve(datasetTopDir).resolve(csvLine("Subset").utf8String).resolve(imagesFailureCsvFilename),
         failureCsvHeaderArray.map(columnName => quoteAuthorAndTitle(csvLine(columnName).utf8String, columnName)).mkString("", ",", "\n").getBytes(StandardCharsets.UTF_8),
         StandardOpenOption.APPEND, StandardOpenOption.WRITE)
     case Failure(exception: Throwable) =>
@@ -303,7 +327,7 @@ case class Director(rootDir: Path,
     case (Success(resp@HttpResponse(Redirection(_), _, _, _)), state@ImageProcessingState(downloadParams, _)) =>
       resp.header[Location] match {
         case Some(location) =>
-//          log.info("{}: location: {}", downloadParams.url, location)
+          //          log.info("{}: location: {}", downloadParams.url, location)
           if (location.uri.path.toString().endsWith("/photo_unavailable.png") || location.uri.path.toString.endsWith("/photo_unavailable_l.png")) {
             log.info("Got a photo unavailable redirect.")
           }
@@ -409,7 +433,9 @@ case class Director(rootDir: Path,
       Files.createDirectories(filePath.getParent) // theoretically this should be done during materialization, but somehow that's a race condition with FileIO.toPath() and so causes random failures.
       broadcastToSinksSingleFuture(FileIO.toPath(filePath), md5Sink())
     } else {
-      val size = try Files.size(filePath) catch { case NonFatal(_) => 0 }
+      val size = try Files.size(filePath) catch {
+        case NonFatal(_) => 0
+      }
       md5Sink().mapMaterializedValue(_.map((IOResult(size, Success(Done)), _)))
     }
   }
@@ -525,7 +551,7 @@ case class Director(rootDir: Path,
       line("OriginalMD5").utf8String, checkMd5IfExists, line)
   }
 
-  def outputDir(line: Map[String, ByteString]): java.nio.file.Path = Paths.get("2017_07", line("Subset").utf8String, originalImagesSubdirectory)
+  def outputDir(line: Map[String, ByteString]): java.nio.file.Path = Paths.get(datasetMetadata.topDir, line("Subset").utf8String, originalImagesSubdirectory)
 
   private def needToDownload(downloadUrlToFile: DownloadParams, alwaysDownload: Boolean): Future[Boolean] = {
     if (alwaysDownload) {

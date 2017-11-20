@@ -7,7 +7,9 @@ import akka.stream.stage.{GraphStage, GraphStageLogic, InHandler, OutHandler}
 import akka.util.ByteString
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 
-case class TarFileCorruptedException() extends RuntimeException("checksum of header record is invalid")
+case class TarFileInvalidChecksumException() extends RuntimeException("checksum of header record is invalid")
+
+case class TarFileEntryIncorrectSizeException(message: String) extends RuntimeException(message)
 
 /**
   * This is used to indicate the first/last record output from the flow for each tar archive entry, which will trigger a new SubFlow for each
@@ -70,7 +72,13 @@ case class TarArchive() extends GraphStage[FlowShape[ByteString, (TarArchiveEntr
           nextRecordOrder = middleRecord
         }
       } else if (recordsRemaining == 1) {
-        push(out, (curEntry.get, chunk.slice(0, (curEntry.get.getSize % 512).toInt), nextRecordOrder))
+        val chunkSize = if (curEntry.get.getSize == 0)
+          0
+        else if (curEntry.get.getSize % 512 == 0)
+          512
+        else
+          (curEntry.get.getSize % 512).toInt
+        push(out, (curEntry.get, chunk.slice(0, chunkSize), nextRecordOrder))
         recordsRemaining = 0
         nextRecordOrder = firstRecord
       } else {
@@ -84,7 +92,7 @@ case class TarArchive() extends GraphStage[FlowShape[ByteString, (TarArchiveEntr
         } else {
           curEntry = Some(new TarArchiveEntry(chunk.toArray))
           if (!curEntry.get.isCheckSumOK) {
-            failStage(TarFileCorruptedException())
+            failStage(TarFileInvalidChecksumException())
           }
           recordsRemaining = curEntry.get.getSize / 512 + (if (curEntry.get.getSize % 512 != 0) 1 else 0)
           nextRecordOrder =
@@ -120,4 +128,5 @@ case class TarArchive() extends GraphStage[FlowShape[ByteString, (TarArchiveEntr
   case class InvalidTarFile(recordsRemaining: Long) extends RuntimeException(s"Expected $recordsRemaining more records")
 
   case class NoEOFInUpstream() extends RuntimeException("Didn't read EOF record. Tar file is corrupt.")
+
 }
